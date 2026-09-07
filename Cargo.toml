@@ -1,0 +1,99 @@
+[package]
+name = "yadgar-project"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "The project registry's logic service: business rules, no store."
+
+[dependencies]
+# NO sqlx, NO yadgar-store, and that absence is the design (D4). A logic service
+# reaches its data only over the -db API; a store SDK in this dependency tree
+# would mean it could open its own connection, which is what the twin exists to
+# prevent. proto-contract-design keeps a per-repo check for exactly this.
+tonic = { version = "0.14", default-features = false, features = [
+  "codegen",
+  "router",
+  "server",
+  "transport",
+  "channel",
+  # `tls-ring`, NOT `tls-aws-lc`. aws-lc-rs needs cmake and a C toolchain, and
+  # this binary builds for x86_64-unknown-linux-musl (D63) — the same provider
+  # yadgar-dial picks, so cargo's feature unification cannot end up asking for
+  # both.
+  #
+  # NAMED HERE rather than inherited from yadgar-dial. This crate serves TLS of
+  # its own now, so it needs the feature whether or not the dial crate happens to
+  # enable it — a dependency's feature is not something this code may rely on. It
+  # adds no crate: `ring` has been in the lock file since the dial pin moved.
+  "tls-ring",
+] }
+tonic-prost = "0.14"
+# How this process starts, stops and restarts: ADR-0523's exit-on-change
+# rotation watcher, the SIGTERM drain, and the budget that bounds it. It was
+# three files in this repository and two others, and the copies had begun to
+# drift — a PEM parser that drifted would be one that disagreed about what a
+# certificate is. The PEM and X.509 parsers and the hash are ITS dependencies
+# now, so they are gone from this manifest.
+#
+# Pinned by a published tag per ADR-0526, like every other in-org crate.
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.9" }
+# The shared instrumentation seam (D67). Pinned by release tag, like every other
+# in-org crate — a branch is a moving target, a published tag is not, and
+# Cargo.lock records the revision each tag resolved to.
+# Client-side balancing, shared rather than copied. This began life as
+# src/balance.rs here; the gateway needed the identical logic and the invariant
+# is that anything every service needs is implemented once.
+yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.5" }
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.9", features = ["grpc"] }
+prost = "0.14"
+prost-types = "0.14"
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+http = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "test-util",
+  "net",
+  "time",
+  "io-util",
+] }
+# `with_local_recorder`, beside `metrics-util`'s `DebuggingRecorder`: the only
+# way `tests/assembly.rs` can assert that the gauge this service publishes
+# carries `service = "project"`. The FACADE only, and a dev-dependency now — the
+# binary installs the exporter and `yadgar-lifecycle` owns the gauge.
+metrics = "0.24"
+metrics-util = { version = "0.20", features = ["debugging"] }
+# `tests/service.rs` serves a scripted ProjectDbService on loopback and points
+# the real handlers at it, so the codec, the trailers and the Status round-trip are
+# exercised rather than stubbed. `TcpListenerStream` is what lets the listener be
+# BOUND before it is served — picking a port and reopening it leaves a window in
+# which something else can take it. Already in the lock file by way of tonic, so
+# this adds no crate to the dependency graph.
+tokio-stream = { version = "0.1", features = ["net"] }
+# `tests/serve_tls.rs` proves the serving transport with REAL handshakes, so it
+# needs a certificate authority and a server certificate. They are MINTED PER
+# RUN rather than checked in: a fixture key in the repository is a secret in the
+# repository, and it expires on a date nobody is watching. Same crate and same
+# features yadgar-dial uses for the client half of this seam.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

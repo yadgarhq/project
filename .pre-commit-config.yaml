@@ -1,0 +1,56 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that HAPPEN to look like YAML —
+        # `{{- toYaml ... }}` is a syntax error to any real parser. Excluding
+        # them is not lowering the bar: `helm lint` and `helm template` are the
+        # checks that actually apply, and they run in CI.
+        exclude: ^chart/templates/
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.18.1
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^(chart/templates/|proto/)
+      - id: hadolint
+      # Every repository here carries workflows, and until this hook was
+      # published nothing linted them. It REFUSES rather than passes when
+      # actionlint's shellcheck rule class is not running: actionlint silently
+      # disables that whole class when the binary is absent, and "Passed, having
+      # checked nothing" is the defect the guard closes.
+      - id: actionlint
+      - id: cargo-fmt
+      - id: cargo-clippy
+      - id: cargo-deny
+      - id: observe-coverage
+      - id: helm-lint
+      # ADR-0569's gate (ledger 648), now shared instead of the byte-identical
+      # copy this repository carried at scripts/no_compiled_in_defaults.sh.
+      # Publishing let the sweep run against repositories the copy never
+      # covered; converting this repository's OWN reference changes no verdict
+      # here (see PR body).
+      - id: no-compiled-in-defaults
+      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
+      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
+      # and this repository measures 0. It is a tripwire for a block someone
+      # writes later, not a fix for anything present now.
+      - id: run-block-size
+      # LEDGER 734, adopting ledger 726's gate: a file read at boot is marked
+      # ADR-0523-WATCHED naming a src/rotate.rs material, or ADR-0523-UNWATCHED
+      # with a reason. This repository had never run it before this PR.
+      - id: boot-reads-watched

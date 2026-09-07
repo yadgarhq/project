@@ -1,0 +1,272 @@
+# In git the image points at a moving TAG; the PUBLISHED chart pins a DIGEST,
+# rewritten by ci-release at package time (D65).
+image:
+  repository: ghcr.io/yadgarhq/project
+  tag: latest
+
+# At least two, always (D55) — and here it is load-bearing rather than
+# ceremonial: D23's client-side balancing cannot be exercised by one replica of
+# the caller talking to one replica of the callee.
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# The HEADLESS Service of the -db twin (D23). Resolving this name yields every
+# ready pod address rather than one virtual IP, which is what makes client-side
+# balancing possible at all.
+projectDb:
+  host: project-db
+  port: 50051
+
+  # The TRANSPORT to that twin. Everything in the cluster is cleartext today,
+  # so a bearer token and every request body cross the pod network in the open;
+  # this is the seam that closes it, one hop at a time.
+  #
+  # PATHS AND A FLAG, NEVER AN ISSUER-SPECIFIC RESOURCE (D80). The chart names a
+  # Secret and a key inside it, and the binary is handed a file path. In the
+  # reference deployment cert-manager writes that Secret; on EKS a Secret
+  # assembled by hand produces something neither the chart nor the binary can
+  # tell apart. Nothing here requires a CRD, an issuer or a mesh.
+  tls:
+    # OFF, and it stays off until the servers can answer. **project-db does not
+    # serve TLS yet**, so turning this on today breaks the hop rather than
+    # securing it. The code ships first and the cut-over is a separate,
+    # revertible change — the same discipline the attestation cut-over used.
+    #
+    # THERE IS NO SILENT MIDDLE STATE. `true` with no usable bundle fails at
+    # boot naming the file; it never falls back to cleartext, and it never falls
+    # back to the platform trust store. `false` with a bundle still configured
+    # is the reverted state, and project logs a warning saying the hop is in
+    # cleartext so nobody has to infer it.
+    enabled: false
+    # The Secret holding the authority that signed project-db's certificate.
+    #
+    # A SECRET, THOUGH A CA IS PUBLIC — because that is where an issuer actually
+    # writes it. Reading it here claims no confidentiality the certificate does
+    # not have.
+    #
+    # NOT A PEM PASTED INTO THIS FILE. The authority rotates, and a copy in git
+    # is correct only until the rotation nobody remembered to follow.
+    caSecret: project-db-tls
+    # The key inside that Secret which holds the bundle, mounted as `ca.pem`.
+    # Named rather than assumed: `ca.crt` is what cert-manager calls it, and a
+    # Secret assembled by hand for a deployment cert-manager does not run in is
+    # free to call it something else.
+    caSecretKey: ca.crt
+    # The name project-db's certificate is verified against, when it is NOT
+    # `projectDb.host`.
+    #
+    # EMPTY IS THE RIGHT ANSWER ALMOST ALWAYS. Client-side balancing dials pod
+    # ADDRESSES, and a certificate names a HOST — so leaving this empty verifies
+    # against the Service name above, which is what lets one certificate issued
+    # for the Service work across every pod behind it. Set it only for a
+    # certificate issued for something else, such as a per-namespace FQDN.
+    domain: ""
+
+    # WHO THIS SERVICE SAYS IT IS WHEN IT DIALS project-db — mutual TLS (ADR-0516).
+    #
+    # A THIRD DIRECTION, and it is not either of the two elsewhere in this file.
+    # `tls` below is what project SERVES; `caSecret` above is how project VERIFIES
+    # project-db. This is what project PRESENTS to project-db, so project-db can authenticate
+    # the caller rather than accepting anything that reaches the port.
+    #
+    # WHY A CERTIFICATE RATHER THAN A NetworkPolicy: ADR-0516. A NetworkPolicy is
+    # enforced by the CNI, so the same manifest protects an EKS deployment and
+    # protects nothing on kind — a control that keeps working while it stops
+    # protecting, which is D80's second and worse failure. A certificate check is
+    # enforced by the services themselves and holds identically everywhere. The
+    # NetworkPolicy still ships, as a second layer rather than as the choice.
+    #
+    # EMPTY, AND THAT IS ITS OWN LEVER. Turning `enabled` on above encrypts the
+    # hop and presents NO identity, exactly as before. Naming a Secret here is a
+    # separate change that can be reverted on its own, which is the discipline
+    # this cut-over is being done under.
+    #
+    # A DIFFERENT CERTIFICATE FROM `tls.certSecret` BELOW, and the difference is
+    # not cosmetic. A serving leaf is issued for `server auth` and this one for
+    # `client auth`; a peer that trusts the issuer perfectly well still refuses a
+    # leaf naming the wrong purpose. One authority issues both.
+    #
+    # IT ROTATES, AND IT IS WATCHED. The mount is a DIRECTORY, never subPath, and
+    # both files join the rotation watch set this binary assembles at boot (ADR-0523).
+    # That matters MORE here than for the serving certificate: ADR-0516 records
+    # that an expired client leaf STOPS this hop rather than degrading it, so a
+    # process that read the file once and never again works perfectly until the
+    # expiry date and then fails hard.
+    #
+    # THE NAME IN THE CERTIFICATE IS `project-caller`, WHICH IS NOT A SERVICE NAME
+    # and is not meant to resolve. Nothing checks it today: project-db's
+    # `client_ca_root` authenticates the DEPLOYMENT that issued the leaf, not
+    # which service presented it. Distinguishing callers is a later change.
+    clientCertSecret: ""
+    # The key inside that Secret holding the certificate, mounted as
+    # `client.crt`. Named rather than assumed, for the reason `caSecretKey` gives.
+    clientCertSecretKey: tls.crt
+    # The key inside that Secret holding the private key, mounted as
+    # `client.key`. Named for the same reason.
+    #
+    # A PRIVATE KEY DOES ENTER THIS POD HERE, unlike the CA mount above, and that
+    # is correct: it is this pod's own key, and a certificate cannot be presented
+    # without it. Both keys are selected by name, so nothing else in the Secret
+    # travels with them.
+    clientKeySecretKey: tls.key
+
+# The TRANSPORT THIS SERVICE SERVES, which is the other half of `projectDb.tls`
+# above: that one encrypts the hop this pod DIALS, this one encrypts the hop the
+# gateway dials to reach this pod. Both halves have to exist before either is
+# worth turning on, which is why they ship in consecutive changes and default
+# off in both.
+#
+# PATHS AND A FLAG, NEVER AN ISSUER-SPECIFIC RESOURCE (D80) — the same shape
+# `projectDb.tls` uses, for the same reason. The chart names a Secret and the keys
+# inside it, and the binary is handed two file paths. In the reference
+# deployment cert-manager writes that Secret; on EKS a Secret assembled by hand
+# produces something neither the chart nor the binary can tell apart. Nothing
+# here requires a CRD, an issuer or a mesh.
+tls:
+  # OFF, and the cut-over is a separate, revertible change. Turning this on
+  # alone breaks every caller still dialling in cleartext — today that is all of
+  # them — so it moves together with the callers' own flags, once certificates
+  # exist. The same discipline the attestation cut-over used.
+  #
+  # THERE IS NO SILENT MIDDLE STATE. `true` with a certificate that is missing,
+  # undecodable, or not the partner of its key fails at boot naming the file.
+  # The process NEVER opens a plaintext listener because TLS configuration
+  # failed. `false` with a certificate still configured is the reverted state,
+  # and project logs a warning saying it is listening in cleartext, so nobody has
+  # to infer it.
+  enabled: false
+  # The Secret holding this service's OWN certificate and its private key.
+  #
+  # A `kubernetes.io/tls` Secret is what an issuer writes, and it carries
+  # `tls.crt`, `tls.key` and usually `ca.crt` together. A CALLER mounts only the
+  # `ca.crt` out of its upstream's Secret — `projectDb.tls.caSecret` above names
+  # project-db's — while this pod mounts the certificate and the key out of its
+  # own. One object per service, read differently by each side.
+  #
+  # AN EMPTY VALUE IS A LEGITIMATE DEPLOYMENT RATHER THAN A MISSING ONE. It is
+  # what every deployment looks like until the cut-over, and `enabled: false` is
+  # what makes it legitimate. The requirement is CONDITIONAL — the template asks
+  # for this only when the flag is set — because a chart that demanded a Secret
+  # nobody has issued yet would fail to install on a cluster running perfectly
+  # well without one.
+  #
+  # NOT A PEM PASTED INTO THIS FILE, and the reason is stronger than it is for a
+  # CA bundle: this Secret holds a PRIVATE KEY. It also rotates, and a copy in
+  # git is correct only until the rotation nobody remembered to follow.
+  certSecret: project-tls
+  # The keys inside that Secret holding the certificate and the private key.
+  # They are mounted as `tls.crt` and `tls.key`.
+  #
+  # Named rather than assumed: those are what a `kubernetes.io/tls` Secret uses,
+  # and a Secret assembled by hand for a deployment cert-manager does not run in
+  # is free to call them something else.
+  certSecretKey: tls.crt
+  keySecretKey: tls.key
+
+# HOW A RENEWED CERTIFICATE ACTUALLY REACHES THE PROCESS.
+#
+# Every certificate above is read ONCE, when the listener is built or the dial is
+# made, and tonic cannot swap a running server's TLS configuration. cert-manager
+# renews 30 days before expiry and kubelet refreshes the mounted files — each
+# Secret is mounted as a DIRECTORY rather than with subPath precisely so it does —
+# but the process would go on using its day-0 material until something restarted
+# it (ADR-0523).
+#
+# So project hashes the TLS files it read at boot — the serving certificate, its key,
+# the CA bundle project-db is verified against, and the client certificate and key
+# project presents to project-db — and when one of them changes it logs which, and the
+# old and new fingerprint, waits out this pod's splay, drains, and exits 0.
+# Kubelet restarts the container and the new process reads the fresh files.
+#
+# THE CLIENT CERTIFICATE IS WHAT THIS MATTERS MOST FOR. ADR-0516 records that an
+# expired client leaf STOPS a hop rather than weakening it, so a process that read
+# it once and never again works perfectly until its expiry date and then cannot
+# reach its own store. The serving leaf degrades what callers see; this one takes
+# the hop away.
+#
+# A HASH RATHER THAN A MODIFICATION TIME, and that is not a detail. Kubelet
+# rotates a mounted Secret by renaming a new `..data` symlink over the old one, so
+# every path resolves to a new inode with a new mtime on EVERY resync, changed or
+# not. An mtime check restarts both replicas for nothing.
+#
+# THE FAILURE MODE IS THE POINT: if the watcher dies you get the old behaviour,
+# never worse. `yadgar_tls_certificate_not_after_seconds` is the other half — it
+# reports the expiry of the certificates this process actually loaded, one series
+# each, told apart by a `kind` label carrying `serving` or `client`. So a watcher
+# that stopped working is still visible as a leaf ageing out.
+#
+# THE WATCHER NO LONGER IDLES ON A DEFAULT INSTALL, and this paragraph used to
+# say it did. With everything above off the watch set used to be empty and
+# nothing was polled; since the mounted configuration document joined the set
+# unconditionally (step 2a, ADR-0569, ADR-0570), every pod polls
+# `shared/shared.yaml` on any install and will drain and exit when an operator
+# edits it. That is ADR-0523 working, not a fault.
+
+# D68: scale on CONCURRENCY, not CPU. A -db waits on MariaDB and a logic service
+# waits on its -db, so both saturate at low CPU — a CPU-driven HPA stays quiet
+# exactly when the system is in trouble.
+#
+# The signal is call RATE per replica, read from D67's metrics. Rate rather than
+# a gauge because nothing tracks in-flight requests yet: rate is what the
+# instrumentation actually exposes today, and pretending otherwise would give a
+# scaler that reads nothing. Stated here rather than silently substituted.
+autoscaling:
+  # D80: KEDA's CRD is not something every adopter has installed. `false` here
+  # is the chart's own default so `helm template`/`helm install` succeed on a
+  # bare cluster; the reference deployment in yadgarhq/deploy sets this true
+  # (autoscaling.enabled=true in its values for this chart) to get the scaling
+  # behaviour described above.
+  enabled: false
+  minReplicas: 2
+  # At least two, always (D55) — the floor is a correctness property, not a
+  # tuning knob: one replica makes a class of defect unreachable.
+  maxReplicas: 6
+  # Calls per second per replica before adding one.
+  threshold: "10"
+  prometheusAddress: http://prometheus-server.observability.svc.cluster.local
+
+# HOW LONG THIS POD STAYS ROUTABLE AFTER DELETION BEGINS (ledger 690). Kubelet
+# runs this sleep BEFORE it sends SIGTERM, so it buys the EndpointSlice removal
+# time to reach whatever routes here. It is spent INSIDE
+# `terminationGracePeriodSeconds` below, never added to it. `0` renders no
+# `lifecycle` block at all. The reasoning, and why an `exec` of /bin/sleep is
+# not an option on a distroless image, is in `templates/deployment.yaml`.
+preStopSleepSeconds: 5
+
+# THE WHOLE BUDGET FOR A POD'S DEATH: the sleep above, then SIGTERM, then the
+# drain, then SIGKILL. 35 = 5 (sleep) + 25 (`yadgar_lifecycle::DRAIN_BUDGET`) +
+# 5 (the slack that constant's docstring reserves to log and exit). Kubelet
+# runs preStop before sending SIGTERM, so the sleep and the drain share one
+# clock. Lowering this below 30 (DRAIN_BUDGET + that slack, both owned by
+# lifecycle/src/drain.rs) breaks that crate's floor, not this chart's. `0`
+# renders nothing and returns the field to kubelet's 30s default.
+terminationGracePeriodSeconds: 35
+
+# THE ROLL. `maxUnavailable: 0` is the guarantee and `maxSurge: 1` is what pays
+# for it. Both are written out because the inherited default is 25% of the LIVE
+# replica count: 0/1 at two replicas, which is what this already does, but 1/2
+# once KEDA scales to `autoscaling.maxReplicas` — a capacity dip nobody chose.
+# `rollingUpdate: {}` returns the field to that default.
+rollingUpdate:
+  maxUnavailable: 0
+  maxSurge: 1
+
+# SPREAD THE REPLICAS OVER NODES, BUT NEVER AT THE COST OF A ROLL (ledger 691).
+# `ScheduleAnyway` is load-bearing rather than timid: `maxSurge: 1` above
+# briefly puts three pods on the reference cluster's two schedulable nodes, and
+# `DoNotSchedule` at `maxSkew: 1` would leave the surge pod Pending and hang the
+# rollout with no error. The `labelSelector` is deliberately NOT here — the
+# template writes `app: <chart name>` itself, because a selector that matches
+# nothing is a field that fails silently for the life of the chart. Set
+# `enabled: false` to render no constraint at all.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
