@@ -1,0 +1,7 @@
+# What this module vendors from yadgarhq/proto (D70). ONE path, not two: both
+# ProjectService — which this module serves — and ProjectDbService — which it is
+# a client of — are declared in yadgar/project/v1/project.proto, so listing the
+# package brings the service definition and the message set together. buf closes
+# the import graph itself, so this also brings yadgar/common/v1. Well-known
+# types are not emitted; protoc supplies them.
+yadgar/project/v1
