@@ -21,8 +21,17 @@ repos:
   # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
+  #
+  # v1.18.2 -> v1.18.3 FOR `complexity` BELOW, AND THE BUMP IS LOAD-BEARING
+  # RATHER THAN HOUSEKEEPING. v1.18.2's copy of the gate exempts a test
+  # DIRECTORY and nothing else, so it measures src/upstream/tests.rs as
+  # production code — this repository would adopt the id and immediately fail
+  # it. The attribute-and-filename exemption (actions#69, ADR-0636) is only in
+  # v1.18.3. `git diff --stat v1.18.2 v1.18.3` is hooks/complexity.py and its
+  # own test file, nothing else, so the other eleven hooks pinned here are
+  # byte-identical across the bump.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.18.2
+    rev: v1.18.3
     hooks:
       - id: gitleaks
       - id: prettier
@@ -36,6 +45,20 @@ repos:
       - id: actionlint
       - id: cargo-fmt
       - id: cargo-clippy
+      # LEDGER 719. The two halves of the complexity gate, adopted together
+      # because neither measures what the other does: `complexity` bounds a
+      # file at 500 lines and a function at 120, and `cargo-clippy-complexity`
+      # bounds nesting and argument count, which no line count can see.
+      #
+      # THIS REPOSITORY WAS OVER THE LINE CEILINGS WHEN THE HOOKS WERE
+      # PUBLISHED, and the refactor that put it under is the PR adopting them —
+      # not a later one. Adopting a limit already breached means starting with
+      # an exemption list, which is how a limit stops meaning anything.
+      #
+      # `cargo-clippy-complexity` measured CLEAN on the tree before that
+      # refactor, so its adoption fixes nothing and forbids a regression.
+      - id: complexity
+      - id: cargo-clippy-complexity
       - id: cargo-deny
       - id: observe-coverage
       - id: helm-lint
