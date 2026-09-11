@@ -31,7 +31,7 @@ repos:
   # own test file, nothing else, so the other eleven hooks pinned here are
   # byte-identical across the bump.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.20.0
+    rev: v1.20.1
     hooks:
       - id: gitleaks
       - id: prettier
