@@ -270,3 +270,70 @@ topologySpread:
   maxSkew: 1
   topologyKey: kubernetes.io/hostname
   whenUnsatisfiable: ScheduleAnyway
+
+# ONE INGRESS NETWORKPOLICY FOR THIS MODULE (ledger 511, stage 4). The full
+# reasoning lives in the comments of `templates/networkpolicy.yaml`, a copy of
+# the canonical template held in `yadgarhq/iam` — this block only carries the
+# values that differ per chart. THIS IS THE HARD CASE OF THE SET: read the
+# `clients` comment below before touching this block.
+networkPolicy:
+  # OFF, AND NOT FOR THE REASON `autoscaling.enabled` IS OFF. That default
+  # exists because KEDA's CRD may be absent and the chart would then not install
+  # at all. A NetworkPolicy is core API and installs everywhere, so that arm of
+  # D80 does not reach it — read alone, D80's fail-closed rule argues for
+  # defaulting this `true`.
+  #
+  # The reason is ASYMMETRIC COST. A wrong policy on an enforcing CNI is an
+  # outage, and an absent one is no worse than today. The allow-list below is
+  # correct for THIS deployment and is an assertion about somebody else's
+  # topology anywhere else. An adopter with an enforcing CNI turns it on with one
+  # value and gets the whole baseline; an adopter whose topology differs is not
+  # handed a silent partition on first install.
+  #
+  # Revisit this once the policies have a negative test behind them in a second
+  # cluster. It is a defensible default until then, and should not be left
+  # `false` by habit after.
+  enabled: false
+  # THE WORKLOADS ALLOWED TO REACH 50052 — EMPTY, AND THAT IS MEASURED RATHER
+  # THAN A PLACEHOLDER. `yadgarhq/gateway`'s chart declares exactly two
+  # upstreams, `task` and `iam` — no `project` key — and ledger 739 records
+  # directly that gateway reaches no ProjectService. Nothing in this
+  # deployment dials `project` on 50052 yet, so there is no workload to name
+  # here.
+  #
+  # THIS IS THE CONSEQUENCE THAT MATTERS MOST IN THIS FILE. The template's
+  # `fail` guard refuses to render rather than open 50052 to every pod in the
+  # cluster — an empty or missing `from` is ALLOW-ALL, not deny-all, per the
+  # Kubernetes API. So with `enabled: false` above (the default), this chart
+  # renders no policy and the guard is never reached; that is the shipped
+  # state and it is correct.
+  #
+  # BUT `fail` ABORTS THE ENTIRE CHART RENDER, NOT JUST THIS TEMPLATE. The
+  # reference deployment turns policies on through the shared `values:` block
+  # in `yadgarhq/argocd`'s ApplicationSet that reaches every module uniformly
+  # (D54). The day somebody sets `networkPolicy.enabled: true` there, THIS
+  # CHART'S WHOLE APPLICATION REFUSES TO SYNC until this list names a
+  # workload. That is deliberate — a chart that cannot express its allow-list
+  # should not be silently installed with either an allow-all or a deny-all —
+  # but it is written here because it is the one thing about this chart's
+  # NetworkPolicy that can surprise the next person who flips that shared
+  # switch. Name the workload once `project` gets a real caller; until then,
+  # do not special-case the template to skip the policy quietly when this list
+  # is empty — that would install the chart with 50052 open to every pod while
+  # a reviewer reading `networkPolicy.enabled: true` believed `project` was
+  # covered. The loud refusal is the feature.
+  clients: []
+  # WHERE THE METRICS SCRAPE COMES FROM. Empty renders NO rule for port 9090 at
+  # all, so a bare install exposes the metrics port to nobody rather than to a
+  # guessed namespace. Set `namespace:` and the template admits that namespace:
+  #
+  #   networkPolicy:
+  #     scrapeFrom:
+  #       namespace: observability
+  #
+  # DEPLOYMENT-SPECIFIC BY NATURE, which is why there is no default. The
+  # reference deployment sets it in `yadgarhq/argocd`'s ApplicationSet, in the
+  # shared `values:` block that already carries `autoscaling.enabled` and
+  # `tls.enabled` — the one place that reaches every module uniformly without
+  # naming any of them (D54).
+  scrapeFrom: {}
