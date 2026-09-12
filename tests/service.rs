@@ -45,6 +45,12 @@ const CALLER_CANDIDATE: &str = "quinyx/qwfm/forecast/the-path-the-caller-sent";
 /// coincidentally passing.
 const STORE_RESOLVED: &str = "acme/assigned-by-the-store";
 
+/// The repo the store names as governing the resolved row's namespace.
+/// Deliberately not equal to [`STORE_RESOLVED`], so a handler that
+/// "helpfully" substitutes the resolved path for an absent source repo is
+/// caught rather than passing by coincidence.
+const STORE_SOURCE_REPO: &str = "yadgarhq/estate";
+
 /// A page token the caller never sends, so a handler synthesising one — or
 /// dropping the store's — is caught either way.
 const STORE_TOKEN: &str = "acme/the-token-the-store-issued";
@@ -398,6 +404,7 @@ async fn every_field_of_a_resolution_reaches_the_caller() {
         exact: false,
         via_alias: true,
         status: pb::ProjectStatus::Archived as i32,
+        source_repo: STORE_SOURCE_REPO.into(),
     })
     .await;
 
@@ -405,10 +412,32 @@ async fn every_field_of_a_resolution_reaches_the_caller() {
     assert!(!got.exact);
     assert!(got.via_alias);
     assert_eq!(got.status, pb::ProjectStatus::Archived as i32);
+    assert_eq!(got.source_repo, STORE_SOURCE_REPO);
     assert_eq!(
         seen.lock().unwrap().resolve[0].candidate_path,
         CALLER_CANDIDATE
     );
+}
+
+/// `source_repo` is a bare proto3 `string`, so an unpopulated value arrives as
+/// `""`, not absent, and `""` is a legitimate answer — the resolved row is
+/// PRIVATE-class or predates the column. The relay must carry that `""`
+/// through unchanged: not substitute `resolved_path` (the "helpful" mutation
+/// [`STORE_SOURCE_REPO`]'s doc comment warns about), not refuse, not map it
+/// to anything else. The gateway is the consumer and decides what an empty
+/// value means.
+#[tokio::test]
+async fn an_absent_source_repo_crosses_the_relay_as_empty() {
+    let (got, _) = resolve_returning(pb::ResolveProjectResponse {
+        resolved_path: STORE_RESOLVED.into(),
+        exact: true,
+        via_alias: false,
+        status: pb::ProjectStatus::Active as i32,
+        source_repo: String::new(),
+    })
+    .await;
+
+    assert_eq!(got.source_repo, "");
 }
 
 /// `exact: false` is "NEITHER AN ERROR NOR A DETAIL: it is the whole safety
@@ -422,6 +451,7 @@ async fn an_inexact_resolution_is_not_an_error() {
         exact: false,
         via_alias: false,
         status: pb::ProjectStatus::Active as i32,
+        source_repo: String::new(),
     })
     .await;
 
