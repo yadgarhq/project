@@ -317,6 +317,15 @@ impl ProjectService for Project {
                     exact: resolved.exact,
                     via_alias: resolved.via_alias,
                     status: resolved.status,
+                    // Crosses unchanged, including empty. `source_repo` is a
+                    // bare proto3 `string`, so an unpopulated value arrives as
+                    // `""`, not absent, and `""` means the resolved row is
+                    // PRIVATE-class or predates the column — a legitimate
+                    // answer, not a gap this tier should paper over. The
+                    // gateway is the consumer and decides what an empty value
+                    // means; do not substitute `resolved.resolved_path` or any
+                    // other value here.
+                    source_repo: resolved.source_repo,
                 })
             },
             |r| Outcome {
