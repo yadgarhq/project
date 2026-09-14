@@ -67,6 +67,12 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
     spec:
+      # ITS OWN, rather than the namespace's `default` (ledger 511). Every pod
+      # gets a ServiceAccount whether or not anybody names one, so the choice is
+      # never "an identity or none" — it is "an identity this workload owns, or
+      # the one every unnamed workload in the namespace shares". A shared identity
+      # cannot be granted a permission without granting it to all of them.
+      serviceAccountName: {{ .Chart.Name }}
       # NO SERVICE ACCOUNT TOKEN IN THIS POD. This binary calls no Kubernetes
       # API: it serves gRPC, dials `project-db`, and reads its configuration from
       # environment variables and mounted files. Without this line kubelet
