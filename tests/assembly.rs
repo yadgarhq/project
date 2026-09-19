@@ -218,9 +218,9 @@ fn concurrent_names_are_all_distinct() {
 }
 
 /// The mounted document `yadgarhq/config` renders into the `shared` ConfigMap
-/// (step 2a) — under its OWN root, never [`Mount`]'s, because the two
-/// ConfigMaps land in separate directories in the real deployment and nothing
-/// here should suggest otherwise.
+/// (step 2a) — under its OWN root, never [`Mount`]'s, because a ConfigMap
+/// mount and a Secret mount land in separate directories in the real
+/// deployment and nothing here should suggest otherwise.
 fn configuration(body: &str) -> Configuration {
     let root = std::env::temp_dir().join(format!("yadgar-project-assembly-config-{}", unique()));
     std::fs::create_dir_all(root.join("shared")).unwrap();
