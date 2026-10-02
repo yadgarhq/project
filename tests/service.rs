@@ -279,9 +279,12 @@ async fn the_bare_reserved_segment_is_dropped_from_the_set() {
 }
 
 /// The comparison folds ASCII case, because `project-db`'s does: `project.path`
-/// takes the server default collation, measured `utf8mb4_uca1400_ai_ci`, and
-/// `path::refuse_reserved_root` uses `eq_ignore_ascii_case`. A byte-exact filter
-/// here would let `LOCAL` through into a set the store's own walk excludes.
+/// carries `COLLATE utf8mb4_general_ci`, declared by `project-db`'s
+/// `create_project` migration (migration 1) and reasserted by
+/// `pin_the_path_collation` (migration 4), which is still the formal
+/// declaration for `project_alias.alias_path`. `path::refuse_reserved_root`
+/// uses `eq_ignore_ascii_case`. A byte-exact filter here would let `LOCAL`
+/// through into a set the store's own walk excludes.
 #[tokio::test]
 async fn the_reserved_segment_filter_folds_ascii_case() {
     let (got, _) = list_returning(pb::ListProjectsResponse {

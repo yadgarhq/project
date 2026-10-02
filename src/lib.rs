@@ -44,17 +44,26 @@ pub mod pb {
                 // `target/.../out/yadgar.project.v1.rs`, none in hand-written
                 // code, and none in `yadgar.common.v1.rs`.
                 //
-                // NO OTHER REPOSITORY HAS MET IT, and that is not luck: `task`,
-                // `iam` and `project-db` all pin `PROTO_VERSION` at `v1.10.2`,
-                // and the comment that trips it arrived with `ProjectService` in
-                // `v1.11.0`. This repository is the first to pin `v1.11.x`, so
-                // it is the first to compile that comment.
+                // NO OTHER REPOSITORY HAD MET IT AT THE TIME THIS SUPPRESSION
+                // WAS ADDED, and that was not luck for `project-db`, which
+                // vendors `yadgar/project/v1` and had pinned `PROTO_VERSION`
+                // below the tag that introduced the comment; `task` and `iam`
+                // never vendor that package at all (see each repository's own
+                // `PROTO_PATHS`), so no version pin would have exposed them to
+                // this lint. The comment that trips it arrived with
+                // `ProjectService` in `v1.11.0`. This repository was the first
+                // to pin `v1.11.x`, so it was the first to compile that comment.
                 //
                 // SCOPED TO THE GENERATED MODULE, never crate-wide: a
                 // hand-written lazy continuation anywhere else in this crate
-                // still fails the build. The fix that removes it belongs in
-                // `yadgarhq/proto` — indent the continuation lines — and this
-                // suppression goes with it.
+                // still fails the build. THIS PER-MODULE `#![allow(...)]` IS THE
+                // ACCEPTED PERMANENT FIX, not a stopgap pending a proto-side
+                // change: `project.proto` is source this repository does not
+                // own, maintained in `yadgarhq/proto`; prost generates this
+                // repository's Rust bindings from it and carries the comment
+                // through verbatim (D16: no hand-editing generated output), so
+                // suppressing the lint at the generated module is how this
+                // repository is meant to carry it.
                 #![allow(clippy::doc_lazy_continuation)]
 
                 tonic::include_proto!("yadgar.project.v1");
