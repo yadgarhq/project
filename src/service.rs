@@ -46,7 +46,9 @@ const RESERVED_ROOT: &str = "local";
 ///
 /// **THE COMPARISON FOLDS ASCII CASE, and both halves of that matter.**
 /// `project.path` carries `COLLATE utf8mb4_general_ci`, declared by
-/// `project-db` migration 4, and `project-db`'s own guard is
+/// `project-db`'s `create_project` migration (migration 1) and reasserted by
+/// `pin_the_path_collation` (migration 4), which is still the formal
+/// declaration for `project_alias.alias_path`. `project-db`'s own guard is
 /// `eq_ignore_ascii_case`. A byte-exact filter here would let `LOCAL` into a set
 /// the store's ancestor walk excludes, and the two walks would then answer one
 /// candidate differently depending on which route the caller took. The segment
