@@ -45,8 +45,8 @@ const RESERVED_ROOT: &str = "local";
 /// Whether a listed path is the bare reserved segment and must be dropped.
 ///
 /// **THE COMPARISON FOLDS ASCII CASE, and both halves of that matter.**
-/// `project.path` is `utf8mb4` with no `COLLATE`, so it takes the server default
-/// — measured `utf8mb4_uca1400_ai_ci` — and `project-db`'s own guard is
+/// `project.path` carries `COLLATE utf8mb4_general_ci`, declared by
+/// `project-db` migration 4, and `project-db`'s own guard is
 /// `eq_ignore_ascii_case`. A byte-exact filter here would let `LOCAL` into a set
 /// the store's ancestor walk excludes, and the two walks would then answer one
 /// candidate differently depending on which route the caller took. The segment
