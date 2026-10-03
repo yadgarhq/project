@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "yadgar/project",
+  "$comment": "Closure is per chart (ADR-0850): this schema closes only the keys this chart owns; it does not close any chart's keys but its own. Every value stays untyped (no `type`, `enum`, `default` or `required`) — a toggle's type, a boolean, and every cross-key rule are `templates/render-checks.yaml`'s job (ADR-0797, ADR-0847), not the schema's. This chart retains no typed leaf. Open maps, declared `{}` on purpose: `global` is the block the parent forwards to every module and the parent (not this chart) closes it; `resources` and `rollingUpdate` are bare Kubernetes maps whose optional sub-keys (e.g. `resources.requests.ephemeral-storage`) this chart never names, so an adopter is free to set any of them. Extras — keys a template reads that `values.yaml` does not declare, so declaring them here closes their parent block rather than leaving it open: `image.digest` is written by ci-release at package time (D65) and is absent from the committed `values.yaml`, which ships only `repository` and `tag`; `networkPolicy.scrapeFrom.namespace` is the one key an adopter sets under the `scrapeFrom: {}` this chart ships empty, to admit the metrics scrape (D54).",
+  "properties": {
+    "image": {
+      "properties": {
+        "repository": {},
+        "tag": {},
+        "digest": {}
+      },
+      "additionalProperties": false
+    },
+    "replicaCount": {},
+    "resources": {},
+    "projectDb": {
+      "properties": {
+        "host": {},
+        "port": {},
+        "tls": {
+          "properties": {
+            "enabled": {},
+            "caSecret": {},
+            "caSecretKey": {},
+            "domain": {},
+            "clientCertSecret": {},
+            "clientCertSecretKey": {},
+            "clientKeySecretKey": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "tls": {
+      "properties": {
+        "enabled": {},
+        "certSecret": {},
+        "certSecretKey": {},
+        "keySecretKey": {}
+      },
+      "additionalProperties": false
+    },
+    "autoscaling": {
+      "properties": {
+        "enabled": {},
+        "kedaOperator": {
+          "properties": {
+            "apiVersion": {}
+          },
+          "additionalProperties": false
+        },
+        "minReplicas": {},
+        "maxReplicas": {},
+        "threshold": {},
+        "prometheusAddress": {}
+      },
+      "additionalProperties": false
+    },
+    "preStopSleepSeconds": {},
+    "terminationGracePeriodSeconds": {},
+    "rollingUpdate": {},
+    "topologySpread": {
+      "properties": {
+        "enabled": {},
+        "maxSkew": {},
+        "topologyKey": {},
+        "whenUnsatisfiable": {}
+      },
+      "additionalProperties": false
+    },
+    "networkPolicy": {
+      "properties": {
+        "enabled": {},
+        "clients": {},
+        "scrapeFrom": {
+          "properties": {
+            "namespace": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "global": {}
+  },
+  "additionalProperties": false
+}
