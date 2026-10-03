@@ -1,9 +1,17 @@
 {{/*
 EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHING.
 
+TWO KINDS OF CHECK LIVE HERE (ADR-0850). A CAPABILITY check reads
+`.Capabilities.APIVersions.Has` through `project.require-api` and refuses when the
+target does not carry an API group this render needs — ONE lives below, KEDA's. A
+SHAPE check reads the release's own values and nothing else; TWO live below, both
+guarding `autoscaling` before it is read as a toggle. `--api-versions`, the
+offline-render rule and the default-false rule are a capability check's concerns —
+a shape check's red and green cases are bare renders.
+
 ONE CHECK PER OPERATOR, NOT ONE PER KIND. `autoscaling.enabled` renders one kind
 today, so the two counts happen to be equal here — they are not the same rule, and
-the number this chart asserts is the number of CHECKS.
+the number this chart asserts is the number of CAPABILITY CHECKS.
 `scripts/tests/test_render_checks.py` counts the checks DECLARED here and asserts
 that number, so a check deleted from this file reddens the suite on the count rather
 than letting it quietly exercise one fewer.
@@ -32,6 +40,58 @@ THE TOGGLE IS OPT-IN, which is what makes this check legal at all: `Has` is fals
 every CRD-backed group with no cluster, so a check reachable at the defaults would
 refuse every offline render.
 */}}
+
+{{/*
+THE SHAPE OF `autoscaling` ITSELF, CHECKED BEFORE THE TOGGLE IS READ AS ONE
+(ADR-0850, ledger 1135).
+
+`autoscaling.enabled` gates a ScaledObject through a bare Go-template `if`, not a
+helm dependency `condition:` — so none of ADR-0794's multi-path machinery
+applies — but the SAME failure shape does. A Go template `if` calls any
+non-empty string true, so `autoscaling.enabled: "false"` — the exact string an
+adopter most plausibly writes meaning "off" — rendered a ScaledObject at exit 0.
+ADR-0850 widens ADR-0797's rule from dependency-condition keys to every boolean
+toggle a template reads.
+
+`hasKey` FIRST, ADR-0794'S IDIOM: `kindOf` answers `invalid` for an absent
+`autoscaling` and for an explicit `autoscaling: null` alike and cannot tell them
+apart; `values.yaml` declares `autoscaling` with its own default, so helm
+DELETES a key written as either of those — the two are the same case here, and
+`hasKey` is what lets the message say "deleted" rather than guess at a type name
+for something that no longer exists.
+
+THE FIRST READER CARRIES ITS OWN GUARD TOO (`scaledobject.yaml`), AND THAT IS NOT
+REDUNDANT. Helm renders templates in reverse path order, so `scaledobject.yaml`
+(s) runs before this file (r): an unguarded `.Values.autoscaling.enabled` on a
+non-map `autoscaling` panics there with a bare Go error
+(`can't evaluate field enabled in type interface {}`) before this file's named
+refusal is ever reached. Fixing the first reader is not enough on its own either —
+a reader with no values checks would still render whatever the toggle's
+truthiness happens to decide, which is the shape of defect ledger 1135 is.
+*/}}
+{{- if not (kindIs "map" .Values.autoscaling) }}
+{{- fail (printf (join "" (list
+      "project: autoscaling must be a mapping with an enabled key, but it is %s. "
+      "A value in this shape cannot be read as true or false, so a KEDA ScaledObject "
+      "renders or does not depending on how Go's template engine happens to read the "
+      "value, not on what you wrote. "
+      "Write `autoscaling.enabled: false` to leave the ScaledObject out, or "
+      "`autoscaling.enabled: true` to let KEDA own the replica count."))
+      (ternary
+        "null (deleted — helm removes a key written as `autoscaling:` with nothing under it, or an explicit `null`, and does not restore the chart's own default)"
+        (kindOf .Values.autoscaling)
+        (hasKey .Values "autoscaling"))) }}
+{{- else if not (kindIs "bool" .Values.autoscaling.enabled) }}
+{{- fail (printf (join "" (list
+      "project: autoscaling.enabled is a %s rather than true or false. "
+      "A Go template `if` calls any non-empty string — including \"false\" and \"no\" — "
+      "or any other non-nil, non-zero value true, so a value in this shape can render a "
+      "ScaledObject the target has no KEDA to reconcile, or silently withhold one you "
+      "meant to render (ledger 1135). "
+      "Write `autoscaling.enabled: false` or `autoscaling.enabled: true`."))
+      (ternary "null" (kindOf .Values.autoscaling.enabled) (kindIs "invalid" .Values.autoscaling.enabled))) }}
+{{- end }}
+
 {{- if .Values.autoscaling.enabled }}
 {{- include "project.require-api" (dict
       "context" $

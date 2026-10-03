@@ -113,6 +113,32 @@ list rather than reconstructing it:
     they render no object of the checked group, and `test_autoscaling.py` carries the
     count those objects are asserted against.
 
+ADR-0850 ADDS A SECOND KIND OF CHECK, BELOW THE CAPABILITY CHECK ABOVE. A SHAPE
+check reads the release's own values and nothing else — no `--api-versions`, no
+offline-render rule, no default-false rule, because none of those are about
+whether a value is of a usable TYPE. Two shape checks live in
+`templates/render-checks.yaml`: `autoscaling` must be a mapping, and
+`autoscaling.enabled` must be `true` or `false`. Neither is counted by
+`declared_checks`/`EXPECTED_RENDER_CHECKS` above — that regex matches only an
+`include "project.require-api"` call, which neither shape check is — so they get
+their own red/green construction below
+(`test_the_shape_checks_refuse_every_unusable_autoscaling_value`,
+`test_the_shape_checks_let_every_usable_autoscaling_value_through`).
+
+`autoscaling.enabled` GATES A SCALEDOBJECT THROUGH A BARE `{{- if }}`, NOT A HELM
+`condition:`, so ADR-0794's multi-path machinery does not apply, but the same
+failure shape does: a Go template `if` calls any non-empty string true, so
+`autoscaling.enabled: "false"` — the string an adopter most plausibly writes
+meaning "off" — rendered a ScaledObject at exit 0 (ledger 1135). `scaledobject.yaml`
+carries its own `kindIs "map"` guard on `autoscaling` for the same reason the
+capability checks' own partial does not need one: helm renders templates in
+reverse path order, so `scaledobject.yaml` (s) runs before `render-checks.yaml`
+(r), and an unguarded `.Values.autoscaling.enabled` on a non-map `autoscaling`
+panics there with a bare Go error before this file's named refusal is ever
+reached. That guard is read-only — it never changes what `scaledobject.yaml`
+renders for a USABLE value — so it is exercised by the same shape-check cases
+rather than by a construction of its own.
+
 Run: python3 -m pytest scripts/tests/ -q
 """
 
@@ -740,3 +766,125 @@ def test_the_checks_are_unreachable_at_the_chart_defaults():
         f"a group a render check asks for — so the check is reachable at the defaults "
         f"and every offline render in the estate refuses"
     )
+
+
+# ── THE SHAPE CHECKS ADR-0850 ADDS (ledger 1135) ─────────────────────────────
+#
+# `-f` rather than `--set`, because `--set` cannot express the three shapes this
+# construction most needs distinctly: an explicit YAML `null` (`--set k=null`
+# DELETES the key, which is also what `-f`'s `null` does — the two agree there),
+# a real empty map (measured: `--set k={}` sets k to the STRING `{}`, truthy to a
+# bare Go template `if`, never to a map), and a quoted string that looks
+# numeric-or-boolean (`--set k="false"` is indistinguishable from `--set
+# k=false`, both unquoted on the CLI). `-f` parses real YAML, so each case below
+# is the literal shape its label names.
+
+
+def write_overlay(tmp_path: Path, content: str) -> Path:
+    """A values overlay file holding `content`, verbatim YAML. PURE except the write."""
+    path = tmp_path / "shape-overlay.yaml"
+    path.write_text(content)
+    return path
+
+
+def render_with_overlay(chart: Path, overlay: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return render(chart, "-f", str(overlay), *arguments)
+
+
+# Every value that must be REFUSED, paired with the overlay that writes it. `0`,
+# an empty map and an explicit `null` do not fail OPEN the way the two strings
+# do — a bare Go template `if` already reads each of them as false, so today's
+# chart renders no ScaledObject for any of the five — but a value of the wrong
+# TYPE is wrong whichever way its truthiness happens to fall, and ADR-0850
+# validates the type rather than the direction one particular value fails in.
+# Measured against THIS chart before this change, on helm 4.3.0: the two
+# strings render a ScaledObject at exit 0 (ledger 1135, reproduced); the other
+# three render nothing, also at exit 0, with no diagnosis that the value was
+# unusable rather than a considered "off".
+AUTOSCALING_ENABLED_RED_CASES = {
+    'the string "false"': 'autoscaling:\n  enabled: "false"\n',
+    'the string "no"': 'autoscaling:\n  enabled: "no"\n',
+    "the number 0": "autoscaling:\n  enabled: 0\n",
+    "an empty map": "autoscaling:\n  enabled: {}\n",
+    "an explicit null": "autoscaling:\n  enabled: null\n",
+}
+
+# `autoscaling` itself set to a value that is not a mapping at all — the shape
+# `scaledobject.yaml`'s own guard exists for. Kept apart from the dict above
+# because its refusal names `autoscaling`, never `autoscaling.enabled`.
+AUTOSCALING_NOT_A_MAP = 'autoscaling: "x"\n'
+
+
+def test_the_shape_checks_refuse_every_unusable_autoscaling_value(tmp_path):
+    """Every value in `AUTOSCALING_ENABLED_RED_CASES` refuses, naming `autoscaling.enabled`.
+
+    PASSES `--api-versions` for every declared capability check throughout, so a
+    refusal here is attributable to the SHAPE check rather than to the
+    capability check beside it: a render with no `--api-versions` at all refuses
+    for the RENDERER'S reason regardless of shape
+    (`test_a_bare_render_refuses_too_and_that_is_the_renderers_reason`), which
+    would prove nothing about this construction.
+    """
+    api_version_arguments = api_versions(EXPECTED_CHECKS)
+    for label, overlay_yaml in AUTOSCALING_ENABLED_RED_CASES.items():
+        overlay = write_overlay(tmp_path, overlay_yaml)
+        result = render_with_overlay(CHART, overlay, *api_version_arguments)
+        assert result.returncode != 0, (
+            f"{label}: rendered successfully, so the shape check did not refuse it"
+        )
+        assert "autoscaling.enabled" in result.stderr, (
+            f"{label}: refused, but did not name autoscaling.enabled: {result.stderr}"
+        )
+        assert "Error: execution error at" in result.stderr, (
+            f"{label}: refused with something other than a named `fail`, so the "
+            f"message is a Go panic rather than ADR-0850's refusal: {result.stderr}"
+        )
+
+
+def test_a_non_map_autoscaling_is_refused_by_name_not_by_panic(tmp_path):
+    """`autoscaling: "x"` names `autoscaling` and carries no raise marker.
+
+    WITHOUT `scaledobject.yaml`'s OWN GUARD this case never reaches a named
+    refusal at all: helm renders `scaledobject.yaml` BEFORE `render-checks.yaml`
+    (reverse path order), and an unguarded `.Values.autoscaling.enabled` on a
+    string panics there with `can't evaluate field enabled in type interface {}`
+    — a raise, naming no key at all, and aborting before this file's check ever
+    runs. MEASURED on this chart before this change, helm 4.3.0: exactly that
+    panic. This case is what proves the two guards work together, not merely
+    that something eventually refuses.
+    """
+    overlay = write_overlay(tmp_path, AUTOSCALING_NOT_A_MAP)
+    result = render_with_overlay(CHART, overlay)
+
+    assert result.returncode != 0, 'autoscaling: "x" rendered successfully'
+    assert "autoscaling" in result.stderr, result.stderr
+    assert "Error: execution error at" in result.stderr, (
+        f"refused with something other than a named `fail`: {result.stderr}"
+    )
+    for raise_marker in ("can't evaluate field", "error calling include", "nil pointer"):
+        assert raise_marker not in result.stderr, (
+            f"the refusal still carries a raise marker ({raise_marker!r}), so "
+            f"scaledobject.yaml's own guard did not stop the panic before "
+            f"render-checks.yaml's named refusal: {result.stderr}"
+        )
+
+
+def test_the_shape_checks_let_every_usable_autoscaling_value_through(tmp_path):
+    """The red construction's own green case: `true` and `false` still render as before.
+
+    Without this, a shape check broadened to refuse EVERY value — including the
+    two usable ones — would pass every case above and report nothing wrong.
+    """
+    api_version_arguments = api_versions(EXPECTED_CHECKS)
+    for value, expected_scaled_objects in (("true", 1), ("false", 0)):
+        overlay = write_overlay(tmp_path, f"autoscaling:\n  enabled: {value}\n")
+        result = render_with_overlay(CHART, overlay, *api_version_arguments)
+        assert result.returncode == 0, f"autoscaling.enabled: {value} refused: {result.stderr}"
+
+        scaled_objects = [
+            document for document in objects(result.stdout) if document.get("kind") == "ScaledObject"
+        ]
+        assert len(scaled_objects) == expected_scaled_objects, (
+            f"autoscaling.enabled: {value} rendered {len(scaled_objects)} ScaledObjects, "
+            f"expected {expected_scaled_objects}"
+        )

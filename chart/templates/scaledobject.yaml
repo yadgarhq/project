@@ -1,4 +1,16 @@
-{{- if .Values.autoscaling.enabled }}
+{{/*
+THE GUARD BELOW IS THIS TEMPLATE'S OWN, NOT A DUPLICATE OF `render-checks.yaml`'s
+(ADR-0850). Helm renders templates in reverse path order, so this file (s) runs
+BEFORE `render-checks.yaml` (r): an unguarded `.Values.autoscaling.enabled` on a
+non-map `autoscaling` panics HERE with a bare Go error before render-checks.yaml's
+named refusal is ever reached. `kindIs "map"` is enough on its own to keep this
+file silent for that shape — it never changes what this file renders for a
+USABLE value, because `and` short-circuits and never widens what counts as
+enabled. The full, named diagnosis — and the `autoscaling.enabled` type check —
+live in `render-checks.yaml`, which still runs (and still refuses) once this file
+stops panicking.
+*/}}
+{{- if and (kindIs "map" .Values.autoscaling) .Values.autoscaling.enabled }}
 # KEDA, not a bare HPA (D68): it wraps a plain HPA for the concurrency cases,
 # handles queue depth natively for the write path, and gives scale-to-zero for a
 # disabled plugin (D1). One mechanism instead of prometheus-adapter plus special
