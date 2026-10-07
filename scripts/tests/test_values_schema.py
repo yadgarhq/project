@@ -83,9 +83,17 @@ EXTRA_LEAVES = (
 
 # THE TWO NAMED EXCEPTIONS (ledger 965, ADR-0845): `tls.enabled` and
 # `projectDb.tls.enabled` are the only typed, required leaves this chart's
-# schema carries. Every other leaf stays untyped `{}`, which is why the
-# oracle below special-cases exactly this set and nothing else — adding a
-# key here is adding a chart-level ADR-0845 refusal, not a convenience.
+# schema carries. Every other leaf stays untyped `{}`.
+#
+# SCHEMA-ONLY, INDEPENDENT OF `values.yaml`, and that independence is the
+# point rather than an implementation detail: this chart ships NO default
+# for either key (ADR-0845 — a chart default would be exactly the
+# compiled-in default the ADR forbids, one layer up), so neither key
+# appears in `chart/values.yaml` at all any more. The oracle cannot derive
+# either leaf by walking `values.yaml`'s own content, the way every other
+# leaf and every `EXTRA_LEAVES` entry is derived; `declare_required_no_default`
+# below injects both directly, the same way `declare_extra` injects a path
+# a template reads that `values.yaml` never declares.
 REQUIRED_NO_DEFAULT = ("tls.enabled", "projectDb.tls.enabled")
 
 
@@ -104,23 +112,13 @@ def expected_node(value, path: str):
     if isinstance(value, dict):
         if not value:
             return {}
-        node = {
+        return {
             "properties": {
                 key: expected_node(sub, f"{path}.{key}" if path else key)
                 for key, sub in value.items()
             },
             "additionalProperties": False,
         }
-        required = sorted(
-            key
-            for key in value
-            if (f"{path}.{key}" if path else key) in REQUIRED_NO_DEFAULT
-        )
-        if required:
-            node["required"] = required
-        return node
-    if path in REQUIRED_NO_DEFAULT:
-        return {"type": "boolean"}
     return {}
 
 
@@ -137,12 +135,37 @@ def declare_extra(schema: dict, path: str) -> None:
     cursor["properties"].setdefault(steps[-1], {})
 
 
+def declare_required_no_default(schema: dict, path: str) -> None:
+    """Declare `path` as a TYPED, REQUIRED leaf (ADR-0845), closing every
+    block along the way exactly as `declare_extra` does. Mutates `schema`.
+
+    UNLIKE `declare_extra`, this OVERWRITES the leaf with `{"type":
+    "boolean"}` rather than `setdefault`-ing `{}` — the leaf is typed, not
+    untyped — and adds the final step to its PARENT's `required` list
+    (merged with whatever is already there, so this chart's own two calls
+    for `tls.enabled` and `projectDb.tls.enabled` cannot clobber each
+    other's `required` list: they are different parents).
+    """
+    cursor = schema
+    steps = path.split(".")
+    for step in steps[:-1]:
+        cursor.setdefault("properties", {})
+        cursor.setdefault("additionalProperties", False)
+        cursor = cursor["properties"].setdefault(step, {})
+    cursor.setdefault("properties", {})
+    cursor.setdefault("additionalProperties", False)
+    cursor["properties"][steps[-1]] = {"type": "boolean"}
+    cursor["required"] = sorted({*cursor.get("required", []), steps[-1]})
+
+
 def expected_schema(values: dict) -> dict:
     """The full `properties` / `additionalProperties` shape this chart's schema owes. PURE."""
     schema = expected_node(values, "")
     schema.setdefault("properties", {})
     schema["additionalProperties"] = False
     schema["properties"].setdefault("global", {})
+    for path in REQUIRED_NO_DEFAULT:
+        declare_required_no_default(schema, path)
     for path in EXTRA_LEAVES:
         declare_extra(schema, path)
     return schema

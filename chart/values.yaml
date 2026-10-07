@@ -33,19 +33,19 @@ projectDb:
   # assembled by hand produces something neither the chart nor the binary can
   # tell apart. Nothing here requires a CRD, an issuer or a mesh.
   tls:
-    # OFF, as the chart's own default. The code shipped first and the
-    # cut-over is a separate, revertible change — the same discipline the
-    # attestation cut-over used. ADR-0845 requires every deployment to STATE
-    # this explicitly: a chart that renders no value here is the one case
-    # the binary itself refuses to boot against (see `tls.enabled` below for
-    # the full ADR-0845 note; the same rule governs this key).
+    # NO DEFAULT HERE, AND NONE ANYWHERE ELSE IN THIS CHART OR THE BINARY
+    # (ADR-0845). Every deployment states `enabled: true` or
+    # `enabled: false` itself; leaving this chart to supply `false` would be
+    # exactly the compiled-in default ADR-0845 forbids, one layer up. The
+    # schema's `required` (`values.schema.json`) and the template's own
+    # shape guard (`templates/render-checks.yaml`) are what refuse an
+    # install that omits it — never a value rendered here.
     #
     # THERE IS NO SILENT MIDDLE STATE. `true` with no usable bundle fails at
     # boot naming the file; it never falls back to cleartext, and it never falls
     # back to the platform trust store. `false` with a bundle still configured
     # is the reverted state, and project logs a warning saying the hop is in
     # cleartext so nobody has to infer it.
-    enabled: false
     # The Secret holding the authority that signed project-db's certificate.
     #
     # A SECRET, THOUGH A CA IS PUBLIC — because that is where an issuer actually
@@ -144,10 +144,15 @@ projectDb:
 # produces something neither the chart nor the binary can tell apart. Nothing
 # here requires a CRD, an issuer or a mesh.
 tls:
-  # OFF, and the cut-over is a separate, revertible change. Turning this on
-  # alone breaks every caller still dialling in cleartext — today that is all of
-  # them — so it moves together with the callers' own flags, once certificates
-  # exist. The same discipline the attestation cut-over used.
+  # NO DEFAULT HERE, AND NONE ANYWHERE ELSE IN THIS CHART OR THE BINARY
+  # (ADR-0845). `LISTEN_TLS_ENABLED` has no compiled-in fallback: the
+  # binary accepts exactly "1" or "0" and refuses the boot, naming the
+  # variable and this key, on anything else — absent, null or any other
+  # value. A chart default of `false` would be exactly the compiled-in
+  # default this rule forbids, one layer up, so this chart ships none:
+  # every deployment states `enabled: true` or `enabled: false` itself.
+  # `values.schema.json`'s `required` and `templates/render-checks.yaml`'s
+  # own shape guard are what refuse an install that omits it.
   #
   # THERE IS NO SILENT MIDDLE STATE. `true` with a certificate that is missing,
   # undecodable, or not the partner of its key fails at boot naming the file.
@@ -156,29 +161,22 @@ tls:
   # and project logs a warning saying it is listening in cleartext, so nobody has
   # to infer it.
   #
-  # NO CHART DEFAULT COULD EVER REPLACE THIS LINE (ADR-0845). The binary has no
-  # compiled-in fallback for `LISTEN_TLS_ENABLED`: it accepts exactly "1" or
-  # "0" and refuses the boot, naming the variable and this key, on anything
-  # else — absent, null or any other value. This chart's own `false` is what
-  # satisfies that requirement for every values file that does not override
-  # it; deleting this line (`tls: {}` with no `enabled`, or `tls.enabled:
-  # null`) is refused at render by `values.schema.json`'s `required` and by
-  # `templates/render-checks.yaml`'s own shape guard, never by a silent
-  # fallback to cleartext or to TLS.
-  enabled: false
   # OFF, AND NOT YET READ BY ANY BINARY (B-U5E, folded expand). `off`,
   # `optional` or `required` will one day select whether this listener asks
   # callers for a certificate; today `templates/render-checks.yaml` refuses
-  # every value but `off`, because no binary in this repository builds
-  # `ServerTlsConfig::client_ca_root` yet — adopting it is B-U5's job, in a
-  # later, separate release. Left UNSET here on purpose, matching
-  # `values.schema.json`'s own "declared but not shipped" extras: setting it
-  # renders `LISTEN_TLS_CLIENT_AUTH`, and an unset key renders nothing,
-  # which is what keeps this release's render byte-identical to
-  # origin/main's.
+  # every value but the quoted string `"off"`, because no binary in this
+  # repository builds `ServerTlsConfig::client_ca_root` yet — adopting it is
+  # B-U5's job, in a later, separate release. Left UNSET here on purpose,
+  # matching `values.schema.json`'s own "declared but not shipped" extras:
+  # the template renders LISTEN_TLS_CLIENT_AUTH only when `enabled` is true
+  # AND this key is present, so an unset key renders nothing, which is what
+  # keeps this release's render byte-identical to origin/main's.
   # clientAuth: "off"
   # The Secret holding the CA bundle this listener will verify CALLERS
-  # against, once `clientAuth` above is adopted. Unset for the same reason.
+  # against, once `clientAuth` above is adopted. Unset for the same reason;
+  # an empty string here is also treated as unset — truthiness, not
+  # `hasKey` — so a values override that nulls the Secret name renders
+  # nothing rather than `secretName: ""`.
   # clientCaSecret: ""
   # The key inside that Secret holding the bundle, mounted as `ca.crt`.
   # clientCaSecretKey: ca.crt
@@ -191,11 +189,11 @@ tls:
   # own. One object per service, read differently by each side.
   #
   # AN EMPTY VALUE IS A LEGITIMATE DEPLOYMENT RATHER THAN A MISSING ONE. It is
-  # what every deployment looks like until the cut-over, and `enabled: false` is
-  # what makes it legitimate. The requirement is CONDITIONAL — the template asks
-  # for this only when the flag is set — because a chart that demanded a Secret
-  # nobody has issued yet would fail to install on a cluster running perfectly
-  # well without one.
+  # what every deployment looks like until the cut-over, and stating
+  # `enabled: false` is what makes it legitimate. The requirement is
+  # CONDITIONAL — the template asks for this only when the flag is set —
+  # because a chart that demanded a Secret nobody has issued yet would fail
+  # to install on a cluster running perfectly well without one.
   #
   # NOT A PEM PASTED INTO THIS FILE, and the reason is stronger than it is for a
   # CA bundle: this Secret holds a PRIVATE KEY. It also rotates, and a copy in

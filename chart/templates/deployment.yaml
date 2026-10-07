@@ -264,7 +264,6 @@ spec:
               value: /var/run/config/serving-cert/tls.crt
             - name: LISTEN_TLS_KEY_FILE
               value: /var/run/config/serving-cert/tls.key
-            {{- end }}
             {{- if hasKey .Values.tls "clientAuth" }}
             # B-U5E (folded expand, ledger 965 K-8): the SCHEMA declares
             # `tls.clientAuth` and this chart renders it, but no binary in this
@@ -272,14 +271,25 @@ spec:
             # server-only TLS, with no `client_ca_root`. The render check
             # refuses any value but "off" until the contract release (B-U5)
             # lifts that, so this can only ever render "off" today.
+            #
+            # NESTED UNDER `tls.enabled`, deliberately (project-db#54's
+            # convention): mutual TLS on the listener is meaningless without
+            # the encrypted transport it runs inside, so a deployment with
+            # the listener off never carries either variable, however
+            # `clientAuth` is set.
             - name: LISTEN_TLS_CLIENT_AUTH
               value: {{ .Values.tls.clientAuth | quote }}
             {{- end }}
             {{- if .Values.tls.clientCaSecret }}
             # Same expand: rendered, read by nobody yet. The path matches the
-            # volume mount named `client-ca` below.
+            # volume mount named `client-ca` below. Gated on TRUTHINESS, not
+            # `hasKey`: an empty string is the unset state (the same rule
+            # every other optional Secret name in this file follows), and
+            # must not render `LISTEN_TLS_CLIENT_CA_FILE` pointing at a mount
+            # that does not exist.
             - name: LISTEN_TLS_CLIENT_CA_FILE
               value: /var/run/config/client-ca/ca.crt
+            {{- end }}
             {{- end }}
           # This service does NOT wait for project-db before listening, so the port
           # opening means "process up", not "dependency healthy" — deliberately.
@@ -470,16 +480,17 @@ spec:
             - name: serving-cert
               mountPath: /var/run/config/serving-cert
               readOnly: true
-            {{- end }}
             {{- if .Values.tls.clientCaSecret }}
             # B-U5E: the CA bundle this listener will verify CALLERS against,
             # once the binary adopts mutual TLS on the serving side (B-U5). A
             # SEPARATE volume from `serving-cert` above because it is very
             # possibly a separate Secret — the authority that signs caller
             # certificates need not be the one that signed this pod's own.
+            # NESTED under `tls.enabled`, same reason as the env vars above.
             - name: client-ca
               mountPath: /var/run/config/client-ca
               readOnly: true
+            {{- end }}
             {{- end }}
       volumes:
         # The `shared` ConfigMap `yadgarhq/config` renders, same reasoning as
@@ -557,18 +568,22 @@ spec:
                 path: tls.crt
               - key: {{ required "tls.keySecretKey names the key inside tls.certSecret that holds the private key and must be set whenever tls.enabled is; see the chart's values.yaml" .Values.tls.keySecretKey | quote }}
                 path: tls.key
-        {{- end }}
         {{- if .Values.tls.clientCaSecret }}
         - name: client-ca
           secret:
             secretName: {{ .Values.tls.clientCaSecret }}
-            # OPTIONAL for the same reason as every other TLS mount above: it
-            # decides which error names the problem. Nothing in this binary
-            # reads this path yet (B-U5E), so today a missing Secret mounts an
-            # empty directory and nothing notices; B-U5's adoption test is what
-            # makes this load-bearing.
-            optional: true
+            # NO `optional: true`, UNLIKE EVERY OTHER TLS MOUNT ABOVE
+            # (convention ruling, B-U5E). The other mounts above are
+            # optional so a missing Secret tells itself apart from a
+            # misconfiguration the operator asked for; this one is
+            # declared ONLY when `tls.clientCaSecret` is already a real
+            # name (the `if` above), so there is no "unset" state left for
+            # `optional: true` to distinguish — a Secret named here that
+            # does not exist is a FailedMount naming the volume, which is
+            # the correct refusal for a name an operator chose and got
+            # wrong.
             items:
               - key: {{ required "tls.clientCaSecretKey names the key inside tls.clientCaSecret that holds the CA bundle this listener will verify callers against and must be set whenever tls.clientCaSecret is; see the chart's values.yaml" .Values.tls.clientCaSecretKey | quote }}
                 path: ca.crt
+        {{- end }}
         {{- end }}

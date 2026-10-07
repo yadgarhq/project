@@ -127,13 +127,21 @@ THEM (ADR-0845, ledger 965 K-1). The binary has NO compiled-in default for
 HERE — `ternary` on a non-bool is a raw Go error on a value that names no
 key, measured on helm 4.3.0.
 
-`values.schema.json`'s `required` pre-empts the fully-absent case (K-1
-accepts that): `tls` missing `enabled` entirely refuses at the schema step
-with its own message, before this guard runs. What this guard owns is
-every shape the schema cannot see — `required` alone passes a NULL
-(`hasKey` is true for a null-valued key the chart declares), so `tls: null`
-and `tls: {enabled: null}` still reach here; `tls: "x"` and
-`tls: {enabled: "true"}` are not `required`'s business at all.
+`values.schema.json`'s `required` + `type: boolean` catches every shape at
+the LEAF, measured rather than assumed: `tls` missing `enabled` entirely,
+`tls: {enabled: null}` (helm deletes a null-valued key any source
+declares, which lands at the schema step exactly like "never declared"),
+and `tls: {enabled: "true"}` (the wrong type) all refuse at the schema
+step with its own message, before this guard ever runs — this chart ships
+NO default for `tls.enabled` to coalesce against (ADR-0845), so there is
+no default left for a null to survive against either. What this guard
+owns is the one shape the schema's nested `properties`/`required` cannot
+see at all: `tls` ITSELF being null or not a map, which those keywords
+never inspect because they only apply when the instance IS an object.
+`tls: null` and `tls: "x"` are refused HERE; a non-bool or absent
+`tls.enabled` never reaches this guard's own `hasKey`/`kindIs "bool"` arms
+on the normal `helm template`/`helm install` path — the schema answers
+first — so those two arms exist only for `--disable-openapi-validation`.
 */}}
 {{- if not (kindIs "map" .Values.tls) }}
 {{- fail (printf (join "" (list
@@ -199,8 +207,10 @@ this release render-neutral against origin/main.
 {{- if hasKey .Values.tls "clientAuth" }}
 {{- if not (kindIs "string" .Values.tls.clientAuth) }}
 {{- fail (printf (join "" (list
-      "project: `tls.clientAuth` must be a string and is %s (%s). Write `off`, "
-      "`optional` or `required`."))
+      "project: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
+      "\"required\") and is %s (%s). YAML reads a bare `off` as the boolean `false` "
+      "(YAML 1.1's typed scalars), which is almost certainly how this value became "
+      "a bool rather than a string: write `clientAuth: \"off\"`, quoted."))
       (kindOf .Values.tls.clientAuth) (toJson .Values.tls.clientAuth)) }}
 {{- end }}
 {{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}
