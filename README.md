@@ -197,7 +197,7 @@ inode with a fresh mtime on every resync, changed or not.
 spawned the binary then, so deleting either compiled and passed the whole suite.
 `main.rs` and `tests/assembly.rs` call the SAME function here, so a deleted
 member turns a test red, and `tests/exit_chain.rs` now runs the binary itself
-(ledger 748). That test shipped in this module's first commit rather than
+(ledger 748). That assembly test shipped in this module's first commit rather than
 arriving in a later sweep.
 
 ## Local development

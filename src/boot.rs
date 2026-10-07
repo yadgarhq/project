@@ -108,8 +108,8 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // when `main` returned `Result` and Rust printed Debug, the same `?`s
     // printed `ParseIntError { kind: InvalidDigit }` and `AddrParseError(())`.)
     // `tests/boot_message.rs` holds the named sentence for this one and for
-    // `LISTEN`. These three were the last bare `?`s left beside the comments
-    // explaining why nothing else is one.
+    // `LISTEN` and `METRICS_LISTEN`. These three were the last bare `?`s left
+    // beside the comments explaining why nothing else is one.
     let db_port: u16 = env_required("PROJECT_DB_PORT")?
         .parse()
         .map_err(|e| format!("PROJECT_DB_PORT is not a port number: {e}"))?;

@@ -129,17 +129,30 @@ fn an_unparsable_metrics_listen_names_the_variable() {
 /// STOP.** `yadgar_lifecycle::drain_within` awaits `stop` FIRST and only then
 /// joins the spawned server — see its own doc comment — so a bind that fails
 /// before any signal arrives leaves the process running (silently, having
-/// bound nothing) rather than exiting. That is exactly what happens in a real
-/// cluster on a bad `LISTEN`: the pod sits Ready-but-deaf until kubelet's
-/// liveness probe eventually sends SIGTERM. This test supplies that SIGTERM
-/// itself, after giving the bind attempt — synchronous, effectively instant —
-/// time to fail.
+/// bound nothing) rather than exiting (ledger 1334 tracks the fix, in
+/// `yadgar-lifecycle`: `drain_within` should `select!` on the server
+/// alongside `stop`, not await `stop` alone).
+///
+/// **TWO REAL MISCONFIGURATIONS PRODUCE THIS, and the chart catches neither
+/// automatically.** A port already held by another container in THIS SAME
+/// POD (pods never share a network namespace with each other, so this is
+/// never a cross-pod collision) leaves the `tcpSocket` readinessProbe on
+/// `grpc` passing against that OTHER container — this is the case below, and
+/// the pod is Ready while this service answers nothing. An address this host
+/// cannot use (`EADDRNOTAVAIL`) or cannot bind (`EACCES`) instead fails that
+/// same probe, so the pod is NotReady forever. There is no `livenessProbe` in
+/// this chart ("failing readiness never kills a pod",
+/// `chart/templates/deployment.yaml`), so NEITHER case ever gets the SIGTERM
+/// that would surface this error — an operator or a rollout has to notice and
+/// replace the pod by hand. This test supplies that missing SIGTERM itself,
+/// after giving the bind attempt — synchronous, effectively instant — time to
+/// fail.
 ///
 /// Held in-process rather than by a second `unshare` child: the listener and
 /// the binary under test must share one network namespace for the collision
 /// to be real, and `unshare -rm` only ever isolates the mount namespace
 /// (`-m`), never the network one, so a plain `TcpListener` here collides with
-/// the child exactly as a second pod on the same node would.
+/// the child exactly as a sidecar container in the same pod would.
 #[test]
 fn a_bind_failure_names_the_listen_address() {
     let holder = TcpListener::bind("127.0.0.1:0").expect("a free port must be available to hold");

@@ -94,8 +94,11 @@ fn env_required(key: &str) -> Result<String, String> {
     }
 }
 
-/// The `project-db` boot refusal, flattened through the estate's one error-chain
-/// walker (ledger 733, ledger 740, ADR-0591) instead of a second copy.
+/// The chain walk every refusal that needs one shares — the `project-db` dial
+/// below, and the gRPC server's own bind/serve failure in
+/// `boot::serve_until_drained` — flattened through the estate's one
+/// error-chain walker (ledger 733, ledger 740, ADR-0591) instead of a second
+/// copy per call site.
 ///
 /// **THE ONLY `to_string()` SITE IN THIS FILE THAT TAKES IT.** Every other
 /// refusal here — `ServeTls`, `UpstreamTls`, `rotate::Configuration` — already
