@@ -8,10 +8,12 @@
 //!
 //! # TLS
 //!
-//! **OPT-IN, and OFF unless a deployment asks for it.** With nothing configured
-//! this dials exactly as it always has, in cleartext. That is deliberate rather
+//! **OPT-IN, and the flag must be STATED (ADR-0845).** `PROJECT_DB_TLS_ENABLED`
+//! has no compiled-in default: exactly `"0"` is the explicit, supported way to
+//! dial in cleartext, and leaving it unset refuses the boot naming the
+//! variable rather than choosing a transport for it. That is deliberate rather
 //! than timid: the code ships first and the cut-over is a separate change that
-//! can be reverted on its own, and no server in the estate serves TLS yet.
+//! can be reverted on its own.
 //!
 //! **Configuration is file paths and a flag, never an issuer-specific resource**
 //! (D80). A CA bundle on disk is written by cert-manager in the reference
@@ -86,6 +88,18 @@ pub const PROJECT_DB: &str = "PROJECT_DB";
 #[derive(Debug, thiserror::Error)]
 pub enum TlsConfigError {
     #[error(
+        "{var}_TLS_ENABLED must be set to exactly \"1\" or \"0\"; ADR-0845 leaves it no \
+         compiled-in default, so this refuses the boot rather than choosing a transport for \
+         it. It is {got}. Set the chart key `{chart_key}` to `true` or `false`, which this \
+         chart renders as \"1\" or \"0\"."
+    )]
+    NotStated {
+        var: &'static str,
+        chart_key: &'static str,
+        got: String,
+    },
+
+    #[error(
         "{0}_TLS_ENABLED is set but {0}_TLS_CA_FILE names no CA bundle. TLS was asked \
          for, so this is a deployment mistake rather than a reason to connect in \
          cleartext — and it is NOT the same as leaving TLS off, which is the \
@@ -151,10 +165,13 @@ struct ClientIdentity {
 impl UpstreamTls {
     /// Read one upstream's transport configuration from the environment.
     ///
-    /// `Ok(None)` is the ordinary answer today: TLS is opt-in, so an
-    /// unconfigured deployment dials in cleartext exactly as before.
-    pub fn from_env(prefix: &'static str) -> Result<Option<Self>, TlsConfigError> {
-        Self::from_lookup(prefix, |key| std::env::var(key).ok())
+    /// `chart_key` is the chart value this binary's refusal names beside the
+    /// variable (ADR-0845).
+    pub fn from_env(
+        prefix: &'static str,
+        chart_key: &'static str,
+    ) -> Result<Option<Self>, TlsConfigError> {
+        Self::from_lookup(prefix, chart_key, |key| std::env::var(key).ok())
     }
 
     /// The same decision, over an injected lookup.
@@ -164,8 +181,16 @@ impl UpstreamTls {
     /// decision that picks between an encrypted transport and a cleartext one
     /// could not be tested at all without this. Copied in shape from the
     /// gateway's `Attestation::from_lookup`, which exists for the same reason.
+    ///
+    /// **ADR-0845: no compiled-in default.** `{prefix}_TLS_ENABLED` must be
+    /// stated as exactly `"1"` or `"0"`; anything else — including absence —
+    /// refuses the boot naming the variable AND `chart_key`. "1"/"0" are read
+    /// literally, never "true"/"false"/"yes"/"no": a permissive parse is how a
+    /// setting meant to be off ends up on, and this flag is the cut-over's
+    /// revert lever, so a lever that moves on the wrong input is not one.
     pub fn from_lookup(
         prefix: &'static str,
+        chart_key: &'static str,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Option<Self>, TlsConfigError> {
         let get = |suffix: &str| {
@@ -174,30 +199,38 @@ impl UpstreamTls {
                 .filter(|v| !v.is_empty())
         };
 
-        // Exactly "1". A permissive parse here — "0", "false" and "no" all
-        // enabling it — is how a setting meant to be off ends up on, and the
-        // reverse mistake is worse: this flag is the revert lever for the
-        // cut-over, and a lever that does not move is not one.
-        if get("TLS_ENABLED").as_deref() != Some("1") {
-            // THE CLIENT CERTIFICATE IS NAMED HERE TOO, and leaving it out was
-            // the silent case: an operator who mounts a client leaf and forgets
-            // the flag gets a cleartext hop presenting no identity, and nothing
-            // says so. Mutual TLS is meaningless without the encrypted transport
-            // it runs inside, so this one flag turns both off.
-            if get("TLS_CA_FILE").is_some() || get("TLS_CLIENT_CERT_FILE").is_some() {
-                // NOT an error. Leaving the bundle in place while the flag is
-                // off is exactly how the cut-over gets reverted, so refusing it
-                // would make the lever unusable. It is still worth a line: a
-                // deployment that believes it is encrypted and is not should be
-                // able to see that from the boot log.
-                tracing::warn!(
-                    prefix,
-                    "a CA bundle or a client certificate is configured but \
-                     {prefix}_TLS_ENABLED is not \"1\", so this upstream is dialled in \
-                     CLEARTEXT and presents no identity"
-                );
+        let enabled = get("TLS_ENABLED");
+        match enabled.as_deref() {
+            Some("1") => {}
+            Some("0") => {
+                // THE CLIENT CERTIFICATE IS NAMED HERE TOO, and leaving it out
+                // was the silent case: an operator who mounts a client leaf and
+                // sets the flag to "0" gets a cleartext hop presenting no
+                // identity, and nothing says so. Mutual TLS is meaningless
+                // without the encrypted transport it runs inside, so this one
+                // flag turns both off.
+                if get("TLS_CA_FILE").is_some() || get("TLS_CLIENT_CERT_FILE").is_some() {
+                    // NOT an error. Leaving the bundle in place while the flag is
+                    // off is exactly how the cut-over gets reverted, so refusing it
+                    // would make the lever unusable. It is still worth a line: a
+                    // deployment that believes it is encrypted and is not should be
+                    // able to see that from the boot log.
+                    tracing::warn!(
+                        prefix,
+                        "a CA bundle or a client certificate is configured but \
+                         {prefix}_TLS_ENABLED is \"0\", so this upstream is dialled in \
+                         CLEARTEXT and presents no identity"
+                    );
+                }
+                return Ok(None);
             }
-            return Ok(None);
+            _ => {
+                return Err(TlsConfigError::NotStated {
+                    var: prefix,
+                    chart_key,
+                    got: enabled.map_or_else(|| "absent".to_string(), |v| format!("{v:?}")),
+                });
+            }
         }
 
         // BOTH, OR NEITHER. A certificate with no key cannot be presented and a

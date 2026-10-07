@@ -272,8 +272,25 @@ def red_api_versions(declared: Iterable[str], under_test: str) -> tuple[str, ...
     ) + FILLER_API_VERSIONS
 
 
+def ci_values_flags(chart: Path) -> tuple[str, ...]:
+    """`-f <chart>/ci/values.yaml`, when that file exists, else nothing.
+
+    THE SAME CONVENTION `yadgarhq/actions`' `helm-lint` hook reads through
+    `chart_values_override.py` (ADR-0845, ledger 965, unit C-A2): every bare
+    `helm template`/`helm lint` in this suite passes it too, so a chart copy
+    in a tmp_path fixture — which carries its own copied `ci/values.yaml` —
+    renders under the same values this repository's CI does. This chart's
+    own `chart/values.yaml` ships a default for every key `ci/values.yaml`
+    states today, so passing it changes NOTHING about what any existing case
+    renders; it is here so a later PR that drops one of those chart defaults
+    does not have to hunt down every bare render call in this file.
+    """
+    path = chart / "ci" / "values.yaml"
+    return ("-f", str(path)) if path.is_file() else ()
+
+
 def render(chart: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return helm("template", CHART_NAME, str(chart), *arguments)
+    return helm("template", CHART_NAME, str(chart), *ci_values_flags(chart), *arguments)
 
 
 def objects(stdout: str) -> list[dict]:

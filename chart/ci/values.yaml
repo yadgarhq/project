@@ -1,0 +1,23 @@
+# THE CHART'S OWN CI VALUES OVERRIDE (ADR-0845, ledger 965, unit C-A2).
+#
+# Read by every shared gate that renders or lints this chart OFFLINE —
+# `helm-lint`, `d80_portability.py`, `service_immutable.py` — passed as
+# `-f chart/ci/values.yaml` beside whatever else each gate already runs.
+# `scripts/chart_values_override.py` (yadgarhq/actions) is the reader; a
+# chart with no file here changes no gate's argv at all.
+#
+# WHY IT EXISTS NOW rather than earlier: `tls.enabled` and
+# `projectDb.tls.enabled` are the first keys this chart's schema requires
+# with no default (ADR-0845). This chart's own `values.yaml` still SHIPS a
+# default for both (`false`), so this file changes nothing about whether a
+# bare `helm lint --strict chart` or `helm template` passes today — it is
+# the explicit declaration the convention asks every chart to carry from the
+# PR that introduces its first required-with-no-default key, so a later PR
+# that drops the chart default (if that default is ever removed) does not
+# newly redden every shared gate with no values file telling them what to
+# render against.
+tls:
+  enabled: false
+projectDb:
+  tls:
+    enabled: false

@@ -7,6 +7,10 @@ const SENTINEL_CLIENT_CERT: &str = "/etc/yadgar/aardvark-9f3c/project-caller.pem
 const SENTINEL_CLIENT_KEY: &str = "/etc/yadgar/aardvark-9f3c/project-caller-key.pem";
 const SENTINEL_DOMAIN: &str = "project-db.verified-as-this.invalid";
 
+/// The chart key [`UpstreamTls::from_lookup`]'s refusal names beside
+/// `PROJECT_DB_TLS_ENABLED`, in every test below.
+const CHART_KEY: &str = "projectDb.tls.enabled";
+
 fn lookup<'a>(pairs: &'a [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> + 'a {
     move |key| {
         pairs
@@ -16,41 +20,73 @@ fn lookup<'a>(pairs: &'a [(&'static str, &'static str)]) -> impl Fn(&str) -> Opt
     }
 }
 
-/// THE DEFAULT, and the property the whole change is built around: nothing
-/// configured means the cleartext path, unchanged.
+/// ADR-0845: THERE IS NO DEFAULT. An absent `PROJECT_DB_TLS_ENABLED` used to
+/// mean the cleartext dial; it now refuses the boot, naming the variable and
+/// the chart key, because a knob with no compiled-in fallback cannot answer
+/// "nothing configured" with a transport choice.
 #[test]
-fn nothing_configured_means_no_tls() {
-    assert_eq!(
-        UpstreamTls::from_lookup(PROJECT_DB, lookup(&[])).unwrap(),
-        None
+fn absent_tls_enabled_refuses_the_boot() {
+    let error = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&[]))
+        .expect_err("an absent PROJECT_DB_TLS_ENABLED must refuse, never silently pick cleartext");
+    assert!(
+        matches!(
+            error,
+            TlsConfigError::NotStated {
+                var: "PROJECT_DB",
+                chart_key: CHART_KEY,
+                ..
+            }
+        ),
+        "{error:?}"
     );
+    let message = error.to_string();
+    assert!(message.contains("PROJECT_DB_TLS_ENABLED"), "{message}");
+    assert!(message.contains(CHART_KEY), "{message}");
 }
 
-/// A bundle without the flag is the REVERTED state, not an error. The flag
-/// is the lever; leaving the path in place is how it gets pulled back.
+/// A bundle without the flag STATED still refuses — the lever is the
+/// explicit `"0"` (`a_ca_bundle_survives_an_explicit_off` below), not mere
+/// absence.
 #[test]
-fn a_ca_bundle_alone_does_not_enable_tls() {
+fn a_ca_bundle_alone_with_no_flag_still_refuses_the_boot() {
     let vars = [("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA)];
+    assert!(matches!(
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)),
+        Err(TlsConfigError::NotStated { .. })
+    ));
+}
+
+/// THE REVERT LEVER. A bundle with the flag explicitly `"0"` is the
+/// reverted state, not an error: leaving the path in place while the flag
+/// is off is how the cut-over gets pulled back.
+#[test]
+fn a_ca_bundle_survives_an_explicit_off() {
+    let vars = [
+        ("PROJECT_DB_TLS_ENABLED", "0"),
+        ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
+    ];
     assert_eq!(
-        UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars)).unwrap(),
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)).unwrap(),
         None
     );
 }
 
-/// Anything but "1" is off. A permissive parse is how a setting meant to be
-/// off ends up on — and here also how one meant to be revertible stops
-/// being.
+/// Only "1" enables and only "0" is the stated-off default; every other
+/// spelling — including the empty string, which `get` treats as unset —
+/// refuses rather than silently choosing a transport.
 #[test]
-fn only_exactly_one_enables_tls() {
-    for value in ["0", "false", "no", "true", "yes", "", " "] {
+fn only_exactly_one_or_zero_are_stated_values() {
+    for value in ["false", "no", "true", "yes", "", " ", "01", "2"] {
         let vars = [
             ("PROJECT_DB_TLS_ENABLED", value),
             ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
         ];
-        assert_eq!(
-            UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars)).unwrap(),
-            None,
-            "{value:?} must not enable TLS"
+        assert!(
+            matches!(
+                UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)),
+                Err(TlsConfigError::NotStated { .. })
+            ),
+            "{value:?} must refuse rather than pick a transport"
         );
     }
 }
@@ -73,7 +109,7 @@ fn asking_for_tls_without_a_ca_bundle_is_an_error() {
     ] {
         assert!(
             matches!(
-                UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars)),
+                UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)),
                 Err(TlsConfigError::NoCaFile("PROJECT_DB"))
             ),
             "{vars:?} must be refused, not silently downgraded"
@@ -90,7 +126,7 @@ fn the_bundle_and_the_domain_both_arrive() {
         ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
         ("PROJECT_DB_TLS_DOMAIN", SENTINEL_DOMAIN),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .expect("a flag and a bundle enable TLS");
     assert_eq!(tls.ca_file(), Path::new(SENTINEL_CA));
@@ -105,7 +141,7 @@ fn the_domain_is_optional() {
         ("PROJECT_DB_TLS_ENABLED", "1"),
         ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .expect("a flag and a bundle enable TLS");
     assert_eq!(tls.domain(), None);
@@ -139,7 +175,7 @@ async fn a_tls_dial_goes_through_connect_tls_and_not_through_connect() {
         ("PROJECT_DB_TLS_ENABLED", "1"),
         ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .unwrap();
 
@@ -180,7 +216,7 @@ async fn a_cleartext_dial_reads_no_bundle() {
         ("PROJECT_DB_TLS_ENABLED", "1"),
         ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .unwrap();
 
@@ -204,12 +240,13 @@ async fn a_cleartext_dial_reads_no_bundle() {
 #[test]
 fn another_upstreams_variables_do_not_configure_this_one() {
     let vars = [
+        ("PROJECT_DB_TLS_ENABLED", "0"),
         ("IAM_TLS_ENABLED", "1"),
         ("IAM_TLS_CA_FILE", SENTINEL_CA),
         ("TLS_ENABLED", "1"),
     ];
     assert_eq!(
-        UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars)).unwrap(),
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)).unwrap(),
         None
     );
 }
@@ -222,7 +259,7 @@ fn no_client_certificate_is_the_default() {
         ("PROJECT_DB_TLS_ENABLED", "1"),
         ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CA),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .expect("a flag and a bundle enable TLS");
     assert_eq!(tls.client_certificate_file(), None);
@@ -241,7 +278,7 @@ fn the_client_certificate_and_its_key_both_arrive() {
         ("PROJECT_DB_TLS_CLIENT_CERT_FILE", SENTINEL_CLIENT_CERT),
         ("PROJECT_DB_TLS_CLIENT_KEY_FILE", SENTINEL_CLIENT_KEY),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .expect("a flag and a bundle enable TLS");
     assert_eq!(
@@ -262,7 +299,7 @@ fn half_a_client_identity_is_refused() {
         ("PROJECT_DB_TLS_CLIENT_CERT_FILE", SENTINEL_CLIENT_CERT),
     ];
     assert!(matches!(
-        UpstreamTls::from_lookup(PROJECT_DB, lookup(&cert_only)),
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&cert_only)),
         Err(TlsConfigError::ClientCertificateWithoutKey(PROJECT_DB))
     ));
 
@@ -272,7 +309,7 @@ fn half_a_client_identity_is_refused() {
         ("PROJECT_DB_TLS_CLIENT_KEY_FILE", SENTINEL_CLIENT_KEY),
     ];
     assert!(matches!(
-        UpstreamTls::from_lookup(PROJECT_DB, lookup(&key_only)),
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&key_only)),
         Err(TlsConfigError::ClientKeyWithoutCertificate(PROJECT_DB))
     ));
 }
@@ -289,26 +326,131 @@ fn an_empty_client_path_is_the_same_as_an_unset_one() {
         ("PROJECT_DB_TLS_CLIENT_CERT_FILE", "  "),
         ("PROJECT_DB_TLS_CLIENT_KEY_FILE", ""),
     ];
-    let tls = UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars))
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars))
         .unwrap()
         .expect("a flag and a bundle enable TLS");
     assert_eq!(tls.client_certificate_file(), None);
 }
 
-/// A CLIENT CERTIFICATE WITHOUT THE FLAG IS THE REVERTED STATE, not an
-/// error. Mutual TLS runs inside the encrypted transport, so the one flag
-/// turns both off, and leaving the paths in place is how the cut-over gets
-/// pulled back.
+/// A CLIENT CERTIFICATE WITH THE FLAG EXPLICITLY OFF IS THE REVERTED STATE,
+/// not an error. Mutual TLS runs inside the encrypted transport, so the one
+/// flag turns both off, and leaving the paths in place is how the cut-over
+/// gets pulled back.
 #[test]
-fn a_client_certificate_alone_does_not_enable_tls() {
+fn a_client_certificate_survives_an_explicit_off() {
     let vars = [
+        ("PROJECT_DB_TLS_ENABLED", "0"),
         ("PROJECT_DB_TLS_CLIENT_CERT_FILE", SENTINEL_CLIENT_CERT),
         ("PROJECT_DB_TLS_CLIENT_KEY_FILE", SENTINEL_CLIENT_KEY),
     ];
     assert_eq!(
-        UpstreamTls::from_lookup(PROJECT_DB, lookup(&vars)).unwrap(),
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)).unwrap(),
         None
     );
+}
+
+/// THE SAME, BUT WITH THE FLAG LEFT UNSTATED ENTIRELY: ADR-0845 refuses this
+/// too, since leaving the paths in place proves nothing about the flag.
+#[test]
+fn a_client_certificate_alone_with_no_flag_still_refuses_the_boot() {
+    let vars = [
+        ("PROJECT_DB_TLS_CLIENT_CERT_FILE", SENTINEL_CLIENT_CERT),
+        ("PROJECT_DB_TLS_CLIENT_KEY_FILE", SENTINEL_CLIENT_KEY),
+    ];
+    assert!(matches!(
+        UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&vars)),
+        Err(TlsConfigError::NotStated { .. })
+    ));
+}
+
+/// AUDIT B S-3 — THE CALLER'S IDENTITY ACTUALLY REACHES `yadgar_dial`'S
+/// `TlsOptions`, proved by a real plumbing failure rather than by comparing
+/// this module's own fields. Every test above stops at
+/// `client_certificate_file()`/`client_key_file()`, which [`UpstreamTls::options`]
+/// could still forget to carry into `TlsOptions::identity` and every one of
+/// them would still pass.
+///
+/// `yadgar_dial::connect_tls` reads the CA bundle FIRST and the client
+/// identity only after, so a client certificate that cannot be read surfaces
+/// as `BalanceError::ClientCertificateUnreadable` ONLY when
+/// `TlsOptions::identity` was actually set on the options this dial was
+/// handed — which is what distinguishes this from `CaUnreadable`. The CA
+/// bundle here is a REAL, readable one (minted with `rcgen`, the same crate
+/// `tests/serve_tls.rs` uses, and for the same reason: a fixture certificate
+/// checked into the repository is a secret checked into the repository) so
+/// the read of it cannot be the thing that fails.
+#[tokio::test]
+async fn the_client_identity_reaches_the_dial_options() {
+    let ca_file = write_temp_pem(&minimal_ca_pem());
+    let missing_cert = std::env::temp_dir().join("yadgar-project-no-such-client-cert-9c40c1.pem");
+
+    // Owned, rather than through the `lookup` helper above: that helper's
+    // pairs must be `&'static str`, and a minted path is not one.
+    let vars = [
+        ("PROJECT_DB_TLS_ENABLED".to_string(), "1".to_string()),
+        (
+            "PROJECT_DB_TLS_CA_FILE".to_string(),
+            ca_file.display().to_string(),
+        ),
+        (
+            "PROJECT_DB_TLS_CLIENT_CERT_FILE".to_string(),
+            missing_cert.display().to_string(),
+        ),
+        (
+            "PROJECT_DB_TLS_CLIENT_KEY_FILE".to_string(),
+            SENTINEL_CLIENT_KEY.to_string(),
+        ),
+    ];
+    let tls = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, |key| {
+        vars.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.to_string())
+    })
+    .unwrap()
+    .expect("a flag and a readable bundle enable TLS");
+
+    let outcome = connect(UNRESOLVABLE, 50051, Some(&tls)).await;
+    let _ = std::fs::remove_file(&ca_file);
+    assert!(
+        matches!(
+            outcome,
+            Err(BalanceError::ClientCertificateUnreadable { .. })
+        ),
+        "a readable CA bundle plus a configured client identity must reach \
+         connect_tls's client-certificate read, naming it rather than the CA bundle: \
+         {outcome:?}"
+    );
+}
+
+/// A minimal self-signed CA, minted fresh for [`the_client_identity_reaches_the_dial_options`].
+fn minimal_ca_pem() -> String {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "yadgar-project test authority");
+    CertifiedIssuer::self_signed(params, key).unwrap().pem()
+}
+
+/// Write `contents` to a fresh file under the temp dir, unique within this
+/// process by a monotonic counter (a clock alone collides across threads —
+/// ledger 531, the same reasoning `tests/serve_tls.rs::unique_name` holds).
+fn write_temp_pem(contents: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "yadgar-project-upstream-ca-{}-{}.pem",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, contents).unwrap();
+    path
 }
 
 /// The gauge `dial` publishes for an upstream that never resolved reaches

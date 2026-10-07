@@ -65,11 +65,28 @@ OPEN = ("resources", "rollingUpdate")
 # Paths a template reads (`grep -rhoE '\.Values(\.[A-Za-z0-9_-]+)+' templates`)
 # that `values.yaml` does not declare. Declaring them as leaves turns their
 # parent block from an open map into a closed one with exactly this key.
-EXTRA_LEAVES = ("image.digest", "networkPolicy.scrapeFrom.namespace")
+#
+# `tls.clientAuth`/`clientCaSecret`/`clientCaSecretKey` are B-U5E's folded
+# expand (ledger 965): `templates/deployment.yaml` reads all three, and
+# `chart/values.yaml` ships none of them — left unset on purpose, so a
+# values file that does not set them renders byte-identical to
+# origin/main's (K-8). `values.schema.json` still has to declare them, or
+# an adopter setting `tls.clientAuth` would be refused by `additionalProperties:
+# false` rather than reaching the render check.
+EXTRA_LEAVES = (
+    "image.digest",
+    "networkPolicy.scrapeFrom.namespace",
+    "tls.clientAuth",
+    "tls.clientCaSecret",
+    "tls.clientCaSecretKey",
+)
 
-# This chart retains no typed leaf (unlike the `-db` twins' `database.
-# migrationLockTimeoutSeconds` or gateway's `toolsPoll.intervalSeconds`) — every
-# leaf here is `{}`, so the oracle below never special-cases one.
+# THE TWO NAMED EXCEPTIONS (ledger 965, ADR-0845): `tls.enabled` and
+# `projectDb.tls.enabled` are the only typed, required leaves this chart's
+# schema carries. Every other leaf stays untyped `{}`, which is why the
+# oracle below special-cases exactly this set and nothing else — adding a
+# key here is adding a chart-level ADR-0845 refusal, not a convenience.
+REQUIRED_NO_DEFAULT = ("tls.enabled", "projectDb.tls.enabled")
 
 
 def load_values() -> dict:
@@ -87,13 +104,23 @@ def expected_node(value, path: str):
     if isinstance(value, dict):
         if not value:
             return {}
-        return {
+        node = {
             "properties": {
                 key: expected_node(sub, f"{path}.{key}" if path else key)
                 for key, sub in value.items()
             },
             "additionalProperties": False,
         }
+        required = sorted(
+            key
+            for key in value
+            if (f"{path}.{key}" if path else key) in REQUIRED_NO_DEFAULT
+        )
+        if required:
+            node["required"] = required
+        return node
+    if path in REQUIRED_NO_DEFAULT:
+        return {"type": "boolean"}
     return {}
 
 

@@ -33,10 +33,12 @@ projectDb:
   # assembled by hand produces something neither the chart nor the binary can
   # tell apart. Nothing here requires a CRD, an issuer or a mesh.
   tls:
-    # OFF, and it stays off until the servers can answer. **project-db does not
-    # serve TLS yet**, so turning this on today breaks the hop rather than
-    # securing it. The code ships first and the cut-over is a separate,
-    # revertible change — the same discipline the attestation cut-over used.
+    # OFF, as the chart's own default. The code shipped first and the
+    # cut-over is a separate, revertible change — the same discipline the
+    # attestation cut-over used. ADR-0845 requires every deployment to STATE
+    # this explicitly: a chart that renders no value here is the one case
+    # the binary itself refuses to boot against (see `tls.enabled` below for
+    # the full ADR-0845 note; the same rule governs this key).
     #
     # THERE IS NO SILENT MIDDLE STATE. `true` with no usable bundle fails at
     # boot naming the file; it never falls back to cleartext, and it never falls
@@ -153,7 +155,33 @@ tls:
   # failed. `false` with a certificate still configured is the reverted state,
   # and project logs a warning saying it is listening in cleartext, so nobody has
   # to infer it.
+  #
+  # NO CHART DEFAULT COULD EVER REPLACE THIS LINE (ADR-0845). The binary has no
+  # compiled-in fallback for `LISTEN_TLS_ENABLED`: it accepts exactly "1" or
+  # "0" and refuses the boot, naming the variable and this key, on anything
+  # else — absent, null or any other value. This chart's own `false` is what
+  # satisfies that requirement for every values file that does not override
+  # it; deleting this line (`tls: {}` with no `enabled`, or `tls.enabled:
+  # null`) is refused at render by `values.schema.json`'s `required` and by
+  # `templates/render-checks.yaml`'s own shape guard, never by a silent
+  # fallback to cleartext or to TLS.
   enabled: false
+  # OFF, AND NOT YET READ BY ANY BINARY (B-U5E, folded expand). `off`,
+  # `optional` or `required` will one day select whether this listener asks
+  # callers for a certificate; today `templates/render-checks.yaml` refuses
+  # every value but `off`, because no binary in this repository builds
+  # `ServerTlsConfig::client_ca_root` yet — adopting it is B-U5's job, in a
+  # later, separate release. Left UNSET here on purpose, matching
+  # `values.schema.json`'s own "declared but not shipped" extras: setting it
+  # renders `LISTEN_TLS_CLIENT_AUTH`, and an unset key renders nothing,
+  # which is what keeps this release's render byte-identical to
+  # origin/main's.
+  # clientAuth: "off"
+  # The Secret holding the CA bundle this listener will verify CALLERS
+  # against, once `clientAuth` above is adopted. Unset for the same reason.
+  # clientCaSecret: ""
+  # The key inside that Secret holding the bundle, mounted as `ca.crt`.
+  # clientCaSecretKey: ca.crt
   # The Secret holding this service's OWN certificate and its private key.
   #
   # A `kubernetes.io/tls` Secret is what an issuer writes, and it carries

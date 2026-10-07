@@ -201,14 +201,17 @@ spec:
               value: "0.0.0.0:50052"
             - name: METRICS_LISTEN
               value: "0.0.0.0:9090"
-            {{- if .Values.projectDb.tls.enabled }}
-            # RENDERED ONLY WHEN TLS IS ASKED FOR, so a deployment that has not
-            # cut over sends the binary nothing at all and takes the cleartext
-            # path it always took. The same shape as the gateway's
-            # trustUnauthenticatedHeaders: absence is the default, and the flag
-            # is the whole of the lever.
+            # UNCONDITIONAL (ADR-0845, K-1 of ledger 965's plan). The binary has
+            # no compiled-in default for `PROJECT_DB_TLS_ENABLED` and refuses an
+            # absent, null or non-"1"/"0" value, so the chart must never leave
+            # this to an `if` — a null or a deleted key would otherwise render
+            # nothing at all, and the binary would refuse the boot with no
+            # value it could even have read. `ternary` reads the RAW value;
+            # `templates/render-checks.yaml` refuses before this line runs if
+            # that value is not a bool.
             - name: PROJECT_DB_TLS_ENABLED
-              value: "1"
+              value: {{ ternary "1" "0" .Values.projectDb.tls.enabled | quote }}
+            {{- if .Values.projectDb.tls.enabled }}
             # A PATH, never an issuer-specific resource (D80). cert-manager
             # writes this file in the reference deployment and a hand-assembled
             # Secret writes it anywhere else; neither the chart nor the binary
@@ -245,13 +248,14 @@ spec:
               value: {{ .Values.projectDb.tls.domain | quote }}
             {{- end }}
             {{- end }}
-            {{- if .Values.tls.enabled }}
             # THE OTHER DIRECTION: what a caller reaching THIS service gets.
-            # Rendered only when asked for, so a deployment that has not cut over
-            # sends the binary nothing and opens the cleartext listener it has
-            # always opened.
+            # UNCONDITIONAL for the same reason as PROJECT_DB_TLS_ENABLED above
+            # (ADR-0845, K-1): no compiled-in default exists on the far side, so
+            # an `if` here could render nothing at all against a value the
+            # binary still refuses to boot without.
             - name: LISTEN_TLS_ENABLED
-              value: "1"
+              value: {{ ternary "1" "0" .Values.tls.enabled | quote }}
+            {{- if .Values.tls.enabled }}
             # PATHS, never an issuer-specific resource (D80). Two of them,
             # because a certificate and its key are two files — and naming them
             # separately is what lets the binary say WHICH of the two was missing
@@ -260,6 +264,22 @@ spec:
               value: /var/run/config/serving-cert/tls.crt
             - name: LISTEN_TLS_KEY_FILE
               value: /var/run/config/serving-cert/tls.key
+            {{- end }}
+            {{- if hasKey .Values.tls "clientAuth" }}
+            # B-U5E (folded expand, ledger 965 K-8): the SCHEMA declares
+            # `tls.clientAuth` and this chart renders it, but no binary in this
+            # repository reads `LISTEN_TLS_CLIENT_AUTH` yet — `serve.rs` builds
+            # server-only TLS, with no `client_ca_root`. The render check
+            # refuses any value but "off" until the contract release (B-U5)
+            # lifts that, so this can only ever render "off" today.
+            - name: LISTEN_TLS_CLIENT_AUTH
+              value: {{ .Values.tls.clientAuth | quote }}
+            {{- end }}
+            {{- if .Values.tls.clientCaSecret }}
+            # Same expand: rendered, read by nobody yet. The path matches the
+            # volume mount named `client-ca` below.
+            - name: LISTEN_TLS_CLIENT_CA_FILE
+              value: /var/run/config/client-ca/ca.crt
             {{- end }}
           # This service does NOT wait for project-db before listening, so the port
           # opening means "process up", not "dependency healthy" — deliberately.
@@ -451,6 +471,16 @@ spec:
               mountPath: /var/run/config/serving-cert
               readOnly: true
             {{- end }}
+            {{- if .Values.tls.clientCaSecret }}
+            # B-U5E: the CA bundle this listener will verify CALLERS against,
+            # once the binary adopts mutual TLS on the serving side (B-U5). A
+            # SEPARATE volume from `serving-cert` above because it is very
+            # possibly a separate Secret — the authority that signs caller
+            # certificates need not be the one that signed this pod's own.
+            - name: client-ca
+              mountPath: /var/run/config/client-ca
+              readOnly: true
+            {{- end }}
       volumes:
         # The `shared` ConfigMap `yadgarhq/config` renders, same reasoning as
         # the mount above: unconditional, a directory, never optional.
@@ -527,4 +557,18 @@ spec:
                 path: tls.crt
               - key: {{ required "tls.keySecretKey names the key inside tls.certSecret that holds the private key and must be set whenever tls.enabled is; see the chart's values.yaml" .Values.tls.keySecretKey | quote }}
                 path: tls.key
+        {{- end }}
+        {{- if .Values.tls.clientCaSecret }}
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.tls.clientCaSecret }}
+            # OPTIONAL for the same reason as every other TLS mount above: it
+            # decides which error names the problem. Nothing in this binary
+            # reads this path yet (B-U5E), so today a missing Secret mounts an
+            # empty directory and nothing notices; B-U5's adoption test is what
+            # makes this load-bearing.
+            optional: true
+            items:
+              - key: {{ required "tls.clientCaSecretKey names the key inside tls.clientCaSecret that holds the CA bundle this listener will verify callers against and must be set whenever tls.clientCaSecret is; see the chart's values.yaml" .Values.tls.clientCaSecretKey | quote }}
+                path: ca.crt
         {{- end }}
