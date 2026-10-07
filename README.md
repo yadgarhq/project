@@ -194,10 +194,11 @@ inode with a fresh mtime on every resync, changed or not.
 
 **`watch_set` is a function, and that is the point rather than tidiness.** In
 `task` the set was two builder calls forty lines apart in `main.rs`; no test
-spawns the binary, so deleting either compiled and passed the whole suite.
+spawned the binary then, so deleting either compiled and passed the whole suite.
 `main.rs` and `tests/assembly.rs` call the SAME function here, so a deleted
-member turns a test red. That test shipped in this module's first commit rather
-than arriving in a later sweep.
+member turns a test red, and `tests/exit_chain.rs` now runs the binary itself
+(ledger 748). That test shipped in this module's first commit rather than
+arriving in a later sweep.
 
 ## Local development
 

@@ -101,14 +101,15 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // The HEADLESS Service name (D23). Resolving it yields every ready pod
     // address rather than one virtual IP.
     let db_host = env_required("PROJECT_DB_HOST")?;
-    // STRINGIFIED AND NAMED. A bare `?` here yields `ParseIntError { kind:
-    // InvalidDigit }`, and the two addresses in `serve_until_drained` yield
-    // `AddrParseError(())` — neither names which variable was wrong or what it
-    // held. It dates from when `main` returned `Result` and Rust printed a
-    // bare `?` here with Debug: `main` prints Display now (ledger 1258), but
-    // naming the variable is still something Display alone cannot do. These
-    // three were the last bare `?`s left beside the comments explaining why
-    // nothing else is one.
+    // STRINGIFIED AND NAMED. A bare `?` here would print only the parse
+    // error's own Display — `invalid digit found in string` — and the two
+    // addresses in `serve_until_drained` would print `invalid socket address
+    // syntax`: neither names the variable or what it held. (Before ledger 1258,
+    // when `main` returned `Result` and Rust printed Debug, the same `?`s
+    // printed `ParseIntError { kind: InvalidDigit }` and `AddrParseError(())`.)
+    // `tests/boot_message.rs` holds the named sentence for this one and for
+    // `LISTEN`. These three were the last bare `?`s left beside the comments
+    // explaining why nothing else is one.
     let db_port: u16 = env_required("PROJECT_DB_PORT")?
         .parse()
         .map_err(|e| format!("PROJECT_DB_PORT is not a port number: {e}"))?;
@@ -258,7 +259,12 @@ pub async fn serve_until_drained(
         }
     };
     match drain_within(serving, ask_to_stop, stop, DRAIN_BUDGET).await {
-        Drain::Finished(result) => result?,
+        Drain::Finished(result) => result.map_err(|e| {
+            format!(
+                "the gRPC server on LISTEN={addr} stopped with an error: {}",
+                crate::refusal(&e)
+            )
+        })?,
         Drain::Overran => tracing::error!(
             budget_secs = DRAIN_BUDGET.as_secs(),
             "the drain did not finish within its budget; ending anyway with calls still in \
