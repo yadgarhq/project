@@ -298,6 +298,31 @@ def test_client_auth_unknown_value_is_refused_for_its_shape(tmp_path):
 
 
 def test_client_ca_secret_set_renders_the_ca_file_env_and_mount(tmp_path):
+    """BOTH gates must be satisfied: `clientAuth` present AND `clientCaSecret`
+    truthy. This case states both."""
+    result = render(
+        CHART,
+        "--set",
+        "tls.enabled=true",
+        "--set",
+        "tls.certSecret=x",
+        "--set-string",
+        "tls.clientAuth=off",
+        "--set",
+        "tls.clientCaSecret=caller-ca",
+        "--set",
+        "tls.clientCaSecretKey=ca.crt",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "LISTEN_TLS_CLIENT_CA_FILE" in result.stdout
+    assert "name: client-ca" in result.stdout
+    assert "secretName: caller-ca" in result.stdout
+
+
+def test_client_ca_secret_set_but_client_auth_absent_renders_nothing(tmp_path):
+    """A CA bundle named with no `clientAuth` key describes a deployment
+    that staged a Secret but never actually opted into client auth — the
+    env, the mount and the volume must all stay absent, not just the env."""
     result = render(
         CHART,
         "--set",
@@ -310,9 +335,9 @@ def test_client_ca_secret_set_renders_the_ca_file_env_and_mount(tmp_path):
         "tls.clientCaSecretKey=ca.crt",
     )
     assert result.returncode == 0, result.stderr
-    assert "LISTEN_TLS_CLIENT_CA_FILE" in result.stdout
-    assert "name: client-ca" in result.stdout
-    assert "secretName: caller-ca" in result.stdout
+    assert "LISTEN_TLS_CLIENT_CA_FILE" not in result.stdout
+    assert "name: client-ca" not in result.stdout
+    assert "secretName: caller-ca" not in result.stdout
 
 
 def test_client_ca_secret_empty_string_renders_no_mount(tmp_path):
@@ -325,6 +350,8 @@ def test_client_ca_secret_empty_string_renders_no_mount(tmp_path):
         "tls.enabled=true",
         "--set",
         "tls.certSecret=x",
+        "--set-string",
+        "tls.clientAuth=off",
         "--set-string",
         "tls.clientCaSecret=",
     )

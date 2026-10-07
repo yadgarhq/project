@@ -280,13 +280,17 @@ spec:
             - name: LISTEN_TLS_CLIENT_AUTH
               value: {{ .Values.tls.clientAuth | quote }}
             {{- end }}
-            {{- if .Values.tls.clientCaSecret }}
+            {{- if and (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
             # Same expand: rendered, read by nobody yet. The path matches the
-            # volume mount named `client-ca` below. Gated on TRUTHINESS, not
-            # `hasKey`: an empty string is the unset state (the same rule
-            # every other optional Secret name in this file follows), and
-            # must not render `LISTEN_TLS_CLIENT_CA_FILE` pointing at a mount
-            # that does not exist.
+            # volume mount named `client-ca` below. Gated on `clientCaSecret`
+            # TRUTHINESS, not `hasKey`: an empty string is the unset state
+            # (the same rule every other optional Secret name in this file
+            # follows), and must not render `LISTEN_TLS_CLIENT_CA_FILE`
+            # pointing at a mount that does not exist. ALSO gated on
+            # `clientAuth` being present at all: a CA bundle named with no
+            # `clientAuth` key describes a deployment that has not actually
+            # opted into client auth, only staged a Secret for it, so this
+            # env — and the mount and volume below — must not render either.
             - name: LISTEN_TLS_CLIENT_CA_FILE
               value: /var/run/config/client-ca/ca.crt
             {{- end }}
@@ -480,13 +484,15 @@ spec:
             - name: serving-cert
               mountPath: /var/run/config/serving-cert
               readOnly: true
-            {{- if .Values.tls.clientCaSecret }}
+            {{- if and (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
             # B-U5E: the CA bundle this listener will verify CALLERS against,
             # once the binary adopts mutual TLS on the serving side (B-U5). A
             # SEPARATE volume from `serving-cert` above because it is very
             # possibly a separate Secret — the authority that signs caller
             # certificates need not be the one that signed this pod's own.
-            # NESTED under `tls.enabled`, same reason as the env vars above.
+            # NESTED under `tls.enabled`, same reason as the env vars above,
+            # and ALSO gated on `clientAuth` being present — the same pair
+            # the env var above checks.
             - name: client-ca
               mountPath: /var/run/config/client-ca
               readOnly: true
@@ -568,7 +574,7 @@ spec:
                 path: tls.crt
               - key: {{ required "tls.keySecretKey names the key inside tls.certSecret that holds the private key and must be set whenever tls.enabled is; see the chart's values.yaml" .Values.tls.keySecretKey | quote }}
                 path: tls.key
-        {{- if .Values.tls.clientCaSecret }}
+        {{- if and (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
         - name: client-ca
           secret:
             secretName: {{ .Values.tls.clientCaSecret }}
@@ -581,7 +587,9 @@ spec:
             # `optional: true` to distinguish — a Secret named here that
             # does not exist is a FailedMount naming the volume, which is
             # the correct refusal for a name an operator chose and got
-            # wrong.
+            # wrong. ALSO gated on `clientAuth` being present — the same
+            # pair the env var and the mount above check, so all three
+            # render together or not at all.
             items:
               - key: {{ required "tls.clientCaSecretKey names the key inside tls.clientCaSecret that holds the CA bundle this listener will verify callers against and must be set whenever tls.clientCaSecret is; see the chart's values.yaml" .Values.tls.clientCaSecretKey | quote }}
                 path: ca.crt

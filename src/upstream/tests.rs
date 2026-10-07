@@ -7,10 +7,6 @@ const SENTINEL_CLIENT_CERT: &str = "/etc/yadgar/aardvark-9f3c/project-caller.pem
 const SENTINEL_CLIENT_KEY: &str = "/etc/yadgar/aardvark-9f3c/project-caller-key.pem";
 const SENTINEL_DOMAIN: &str = "project-db.verified-as-this.invalid";
 
-/// The chart key [`UpstreamTls::from_lookup`]'s refusal names beside
-/// `PROJECT_DB_TLS_ENABLED`, in every test below.
-const CHART_KEY: &str = "projectDb.tls.enabled";
-
 fn lookup<'a>(pairs: &'a [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> + 'a {
     move |key| {
         pairs
@@ -28,6 +24,13 @@ fn lookup<'a>(pairs: &'a [(&'static str, &'static str)]) -> impl Fn(&str) -> Opt
 fn absent_tls_enabled_refuses_the_boot() {
     let error = UpstreamTls::from_lookup(PROJECT_DB, CHART_KEY, lookup(&[]))
         .expect_err("an absent PROJECT_DB_TLS_ENABLED must refuse, never silently pick cleartext");
+    // STATIC FAILURE MESSAGES, deliberately: CodeQL's cleartext-logging query
+    // flags interpolating `error`/`message` here, reading the enum's own
+    // variant names (`NotStated`, and the sibling `NoCaFile`/`...WithoutKey`
+    // variants elsewhere in this type) as sensitive-looking identifiers. None
+    // of this is secret — it is this module's own config-shape error — but
+    // naming what was EXPECTED costs nothing and the assertion is exactly as
+    // strict either way.
     assert!(
         matches!(
             error,
@@ -37,11 +40,17 @@ fn absent_tls_enabled_refuses_the_boot() {
                 ..
             }
         ),
-        "{error:?}"
+        "an absent PROJECT_DB_TLS_ENABLED must produce TlsConfigError::NotStated naming PROJECT_DB and the chart key"
     );
     let message = error.to_string();
-    assert!(message.contains("PROJECT_DB_TLS_ENABLED"), "{message}");
-    assert!(message.contains(CHART_KEY), "{message}");
+    assert!(
+        message.contains("PROJECT_DB_TLS_ENABLED"),
+        "the refusal must name the PROJECT_DB_TLS_ENABLED variable"
+    );
+    assert!(
+        message.contains(CHART_KEY),
+        "the refusal must name the chart key"
+    );
 }
 
 /// A bundle without the flag STATED still refuses — the lever is the

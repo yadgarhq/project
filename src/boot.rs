@@ -33,7 +33,7 @@ use yadgar_project::pb::yadgar::project::v1::project_service_server::ProjectServ
 use yadgar_project::rotate::{self, Inputs, Schedule};
 use yadgar_project::serve::{self, ServeTls, LISTEN};
 use yadgar_project::service::Project;
-use yadgar_project::upstream::{UpstreamTls, PROJECT_DB};
+use yadgar_project::upstream::{self, UpstreamTls, PROJECT_DB};
 
 // `main.rs`'s own helper, reached through the binary's crate root: this module
 // is its descendant, so the private item is in scope. It stays there because
@@ -96,7 +96,7 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // structural rather than tidy: the downgrade this car removes is a listener
     // that opens in cleartext because TLS configuration failed, and with one
     // construction site there is nowhere else to write it.
-    let tls = ServeTls::from_env(LISTEN, "tls.enabled").map_err(|e| e.to_string())?;
+    let tls = ServeTls::from_env(LISTEN, serve::CHART_KEY).map_err(|e| e.to_string())?;
     let server = serve::builder(tls.as_ref()).map_err(|e| e.to_string())?;
 
     // The HEADLESS Service name (D23). Resolving it yields every ready pod
@@ -127,7 +127,7 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // no longer changes what the operator reads; it stays as the sentence it
     // always produced. The same reason the gateway stringifies `Limits::parse`.
     let db_tls =
-        UpstreamTls::from_env(PROJECT_DB, "projectDb.tls.enabled").map_err(|e| e.to_string())?;
+        UpstreamTls::from_env(PROJECT_DB, upstream::CHART_KEY).map_err(|e| e.to_string())?;
 
     // THE ROTATION SCHEDULE, READ FROM THE MOUNTED DOCUMENT (ADR-0569,
     // ADR-0570). `yadgarhq/config` renders it into the `shared` ConfigMap,

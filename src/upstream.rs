@@ -84,6 +84,17 @@ use yadgar_dial::{BalanceError, TlsOptions};
 /// has two, and uses the identical shape for both.
 pub const PROJECT_DB: &str = "PROJECT_DB";
 
+/// The chart value [`UpstreamTls::from_env`]'s refusal names beside
+/// `PROJECT_DB_TLS_ENABLED` (ADR-0845).
+///
+/// **ONE SOURCE, READ BY `boot.rs` AND BY EVERY TEST THAT NAMES IT** — the
+/// same reason [`crate::serve::CHART_KEY`] exists: a string literal typed
+/// out separately at the call site and again inside the test module's own
+/// constant is two places a typo in either one could diverge from the
+/// other, unnoticed, since the unit tests exercised `from_lookup` with
+/// their OWN copy rather than the one `boot.rs` actually passes.
+pub const CHART_KEY: &str = "projectDb.tls.enabled";
+
 /// What a deployment got wrong about the transport, before anything is dialled.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsConfigError {

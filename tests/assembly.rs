@@ -247,7 +247,7 @@ fn listener_tls(mount: &Mount) -> ServeTls {
             mount.path("tls-key.pem").display().to_string(),
         ),
     ];
-    ServeTls::from_lookup(serve::LISTEN, "tls.enabled", move |k| {
+    ServeTls::from_lookup(serve::LISTEN, serve::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -271,7 +271,7 @@ fn upstream_tls(mount: &Mount) -> UpstreamTls {
             mount.path("client-key.pem").display().to_string(),
         ),
     ];
-    UpstreamTls::from_lookup(upstream::PROJECT_DB, "projectDb.tls.enabled", move |k| {
+    UpstreamTls::from_lookup(upstream::PROJECT_DB, upstream::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -380,7 +380,7 @@ fn each_configured_half_contributes_on_its_own() {
         ),
     ];
     let server_only =
-        UpstreamTls::from_lookup(upstream::PROJECT_DB, "projectDb.tls.enabled", move |k| {
+        UpstreamTls::from_lookup(upstream::PROJECT_DB, upstream::CHART_KEY, move |k| {
             vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
         })
         .expect("a complete configuration")
