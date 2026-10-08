@@ -60,12 +60,6 @@
 
 mod boot;
 
-use std::net::SocketAddr;
-
-use yadgar_lifecycle::{drain_within, shutdown, Drain, DRAIN_BUDGET};
-use yadgar_project::pb::yadgar::project::v1::project_service_server::ProjectServiceServer;
-use yadgar_project::rotate;
-use yadgar_project::service::Project;
 use yadgar_project::upstream;
 
 /// One configuration knob, read from its ONE source, with no compiled-in
@@ -100,8 +94,11 @@ fn env_required(key: &str) -> Result<String, String> {
     }
 }
 
-/// The `project-db` boot refusal, flattened through the estate's one error-chain
-/// walker (ledger 733, ledger 740, ADR-0591) instead of a second copy.
+/// The chain walk every refusal that needs one shares — the `project-db` dial
+/// below, and the gRPC server's own bind/serve failure in
+/// `boot::serve_until_drained` — flattened through the estate's one
+/// error-chain walker (ledger 733, ledger 740, ADR-0591) instead of a second
+/// copy per call site.
 ///
 /// **THE ONLY `to_string()` SITE IN THIS FILE THAT TAKES IT.** Every other
 /// refusal here — `ServeTls`, `UpstreamTls`, `rotate::Configuration` — already
@@ -135,28 +132,37 @@ fn refusal(error: &dyn std::error::Error) -> String {
     yadgar_telemetry::diagnose::chain(error)
 }
 
+/// The process entry point: run the service, and print a refusal as its SENTENCE.
+///
+/// **NOT `main() -> Result`** (ledger 1258). Rust prints a `main` that returns
+/// `Err` with DEBUG, so even a refusal already converted to its sentence
+/// arrived quoted and escaped — `Error: "LISTEN_TLS_ENABLED is set but …"` —
+/// and a typed error that skipped the conversion arrived as its variant name.
+/// ADR-0569 asks a refusal to name the knob and where it is set; an operator
+/// reading a crash loop must get that as plain text. `tests/boot_message.rs`
+/// runs the binary and holds it. Shape and wording follow `iam-db`'s `main`.
+///
+/// The exit status is unchanged: an `Err` from `main` exits 1, and so does
+/// `ExitCode::FAILURE`. A drain — after SIGTERM or after a rotation — still
+/// returns `Ok(())` and exits 0, which `tests/exit_chain.rs` holds (ledger 748).
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .json()
-        // A DEFAULT, because from_default_env() with RUST_LOG unset enables
-        // NOTHING — the service runs silently and its boot sequence, its
-        // capability probe result and its errors all vanish. Found by deploying:
-        // two replicas were Running and `kubectl logs` returned nothing at all,
-        // so the only way to see why one had restarted was the previous
-        // container's exit output.
-        //
-        // A service nobody can observe is one D67 cannot measure either.
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    boot::install_logging();
 
     // Every input read and CHECKED before the dial below — see `boot`, which
     // records why the seam is here and what is deliberately left after it.
     let boot::Prepared {
-        mut server,
+        server,
         tls,
         db_host,
         db_port,
@@ -171,8 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the chain walk. `BalanceError`'s other messages are already complete
         // paragraphs explaining that an empty bundle trusts nobody and that a
         // missing one is not a reason to connect in cleartext — `Tls` is not
-        // one of them, and Debug would print the struct and throw all of that
-        // away regardless.
+        // one of them.
         .map_err(|e| refusal(&e))?;
     tracing::info!(
         reresolve_secs = yadgar_dial::reresolve_interval().as_secs(),
@@ -180,75 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "connected to project-db"
     );
 
-    // The BINARY installs the exporter, never the library — a library that
-    // installs one picks the backend for every service linking it. A failure here
-    // is logged and ignored: a service that cannot export metrics should still
-    // serve traffic, which is D25's rule applied to the metrics path too.
-    // Named on the way out, for the reason given on PROJECT_DB_PORT above.
-    let metrics_addr: SocketAddr = env_required("METRICS_LISTEN")?
-        .parse()
-        .map_err(|e| format!("METRICS_LISTEN is not a host:port address: {e}"))?;
-    if let Err(e) = yadgar_telemetry::metrics::install_prometheus(metrics_addr) {
-        tracing::warn!(error = %e, "metrics endpoint unavailable; continuing without it");
-    }
-
-    // AFTER THE EXPORTER, NEVER BEFORE IT. A value recorded before there is a
-    // recorder is a value nobody ever sees.
-    watch_inputs.export_not_after();
-
-    // Named on the way out, for the reason given on PROJECT_DB_PORT above.
-    let addr: SocketAddr = env_required("LISTEN")?
-        .parse()
-        .map_err(|e| format!("LISTEN is not a host:port address: {e}"))?;
-
-    // ARMED BEFORE THE SERVER IS SPAWNED, and that ordering is the fix rather
-    // than an accident of where the line sits. `yadgar_lifecycle::shutdown`
-    // installs both signal handlers when it is CALLED — a SIGTERM arriving between here and
-    // the first poll of the future would otherwise take the process's default
-    // disposition and kill it outright.
-    let signals = shutdown().map_err(|e| {
-        format!("the SIGTERM and SIGINT handlers could not be installed: {e}. Refusing to start: a server that cannot hear SIGTERM cannot drain, and Kubernetes ends every pod with one")
-    })?;
-
-    tracing::info!(
-        %addr,
-        tls = tls.is_some(),
-        watching = watch_inputs.watched().len(),
-        rotation_poll_secs = schedule.poll().as_secs(),
-        rotation_splay_max_secs = schedule.splay_max().as_secs(),
-        drain_budget_secs = DRAIN_BUDGET.as_secs(),
-        "project listening"
-    );
-
-    // THE SERVER IS SPAWNED AND ASKED TO STOP THROUGH A CHANNEL, rather than
-    // handed the shutdown future directly, because the drain has to be BOUNDED
-    // and a budget's clock must start when shutdown is REQUESTED. A `timeout`
-    // around the serving future itself would bound the server's whole life
-    // instead, and end the process one budget after boot, on every boot.
-    let (ask_to_stop, stop_requested) = tokio::sync::oneshot::channel();
-    let serving = tokio::spawn(
-        server
-            .add_service(ProjectServiceServer::new(Project::new(channel)))
-            .serve_with_shutdown(addr, async {
-                let _ = stop_requested.await;
-            }),
-    );
-    let stop = async {
-        tokio::select! {
-            () = signals => {}
-            () = rotate::watch(watch_inputs, schedule) => {}
-        }
-    };
-    match drain_within(serving, ask_to_stop, stop, DRAIN_BUDGET).await {
-        Drain::Finished(result) => result?,
-        Drain::Overran => tracing::error!(
-            budget_secs = DRAIN_BUDGET.as_secs(),
-            "the drain did not finish within its budget; ending anyway with calls still in \
-             flight. A request blocked this long is the thing to look at"
-        ),
-    }
-
-    Ok(())
+    boot::serve_until_drained(server, tls, channel, watch_inputs, schedule).await
 }
 
 #[cfg(test)]
@@ -364,6 +301,7 @@ mod tests {
         ];
         yadgar_project::upstream::UpstreamTls::from_lookup(
             yadgar_project::upstream::PROJECT_DB,
+            yadgar_project::upstream::CHART_KEY,
             |key| {
                 vars.iter()
                     .find(|(k, _)| k == key)

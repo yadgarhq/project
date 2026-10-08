@@ -10,8 +10,8 @@
 //! exactly these files are watched.**
 //!
 //! **THE MUTANT THIS FILE EXISTS TO KILL.** The watch set used to be two builder
-//! calls in `main.rs`, forty lines apart, and no test in this repository spawns
-//! the binary — so deleting either compiled, passed the whole suite, and shipped
+//! calls in `main.rs`, forty lines apart, and no test in this repository spawned
+//! the binary then — so deleting either compiled, passed the whole suite, and shipped
 //! a process that would never notice that file rotating. The old
 //! `tests/tls_rotation.rs` could not catch it: it rebuilt the same assembly by
 //! hand, so `main.rs` and the test could disagree while both stayed green. Every
@@ -247,7 +247,7 @@ fn listener_tls(mount: &Mount) -> ServeTls {
             mount.path("tls-key.pem").display().to_string(),
         ),
     ];
-    ServeTls::from_lookup(serve::LISTEN, move |k| {
+    ServeTls::from_lookup(serve::LISTEN, serve::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -271,7 +271,7 @@ fn upstream_tls(mount: &Mount) -> UpstreamTls {
             mount.path("client-key.pem").display().to_string(),
         ),
     ];
-    UpstreamTls::from_lookup(upstream::PROJECT_DB, move |k| {
+    UpstreamTls::from_lookup(upstream::PROJECT_DB, upstream::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -379,11 +379,12 @@ fn each_configured_half_contributes_on_its_own() {
             mount.path("ca.pem").display().to_string(),
         ),
     ];
-    let server_only = UpstreamTls::from_lookup(upstream::PROJECT_DB, move |k| {
-        vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
-    })
-    .expect("a complete configuration")
-    .expect("the flag is set");
+    let server_only =
+        UpstreamTls::from_lookup(upstream::PROJECT_DB, upstream::CHART_KEY, move |k| {
+            vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+        })
+        .expect("a complete configuration")
+        .expect("the flag is set");
     assert_eq!(
         rotate::watch_set(None, Some(&server_only), &config).watched(),
         vec![mount.path("ca.pem").as_path(), config.path()],

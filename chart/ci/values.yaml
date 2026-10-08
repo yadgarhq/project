@@ -1,0 +1,32 @@
+# THE CHART'S OWN CI VALUES OVERRIDE (ADR-0845, ledger 965, unit C-A2).
+#
+# Read by every shared gate that renders or lints this chart OFFLINE —
+# `helm-lint`, `d80_portability.py`, `service_immutable.py` — passed as
+# `-f chart/ci/values.yaml` beside whatever else each gate already runs.
+# `scripts/chart_values_override.py` (yadgarhq/actions) is the reader; a
+# chart with no file here changes no gate's argv at all.
+#
+# WHY IT EXISTS: `tls.enabled` and `projectDb.tls.enabled` are required
+# with NO default anywhere in this chart (ADR-0845) — `chart/values.yaml`
+# ships neither any more, because a chart default would be exactly the
+# compiled-in default ADR-0845 forbids, one layer up. A bare `helm lint
+# --strict chart` or `helm template` with no values file therefore refuses
+# at the schema the moment either key is read, which is every render; this
+# file is what the shared gates pass so they render at all.
+#
+# BOTH SWITCHES ARE TRUE, DELIBERATELY, rather than false. A gate that only
+# ever renders with TLS off never exercises the certificate mounts, the
+# volumes, or the env vars this chart renders behind `tls.enabled`/
+# `projectDb.tls.enabled` — `d80_portability.py` and `service_immutable.py`
+# both inspect the rendered Deployment, and a chart whose shared-gate
+# render never turns TLS on would ship that whole path unexercised by
+# anything but this repository's own `scripts/tests/`. `chart/values.yaml`
+# still ships real Secret names for `tls.certSecret`, `projectDb.tls.caSecret`
+# and the rest, so turning both switches on here renders a complete,
+# non-refusing Deployment rather than tripping the `required "..."` calls
+# those mounts carry.
+tls:
+  enabled: true
+projectDb:
+  tls:
+    enabled: true

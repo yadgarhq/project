@@ -76,12 +76,37 @@ use yadgar_telemetry::diagnose::chain;
 /// pin both halves of that.
 pub const LISTEN: &str = "LISTEN";
 
+/// The chart value [`ServeTls::from_env`]'s refusal names beside
+/// `LISTEN_TLS_ENABLED` (ADR-0845).
+///
+/// **ONE SOURCE, READ BY `boot.rs` AND BY EVERY TEST THAT NAMES IT.** This
+/// used to be a bare `"tls.enabled"` string literal typed out separately at
+/// `boot.rs`'s call site and again inside this module's own test constant —
+/// two places a typo in either one could diverge from the other with
+/// nothing to notice, since the unit tests exercised `from_lookup` with
+/// their OWN copy of the string rather than the one `boot.rs` actually
+/// passes. A single `pub const` removes the duplication rather than
+/// re-checking it.
+pub const CHART_KEY: &str = "tls.enabled";
+
 /// What a deployment got wrong about the transport, before anything is bound.
 ///
 /// Every variant is a REFUSAL. There is no variant meaning "carry on in
 /// cleartext", because there is no such outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeTlsError {
+    #[error(
+        "{var}_TLS_ENABLED must be set to exactly \"1\" or \"0\"; ADR-0845 leaves it no \
+         compiled-in default, so this refuses the boot rather than choosing a transport for \
+         it. It is {got}. Set the chart key `{chart_key}` to `true` or `false`, which this \
+         chart renders as \"1\" or \"0\"."
+    )]
+    NotStated {
+        var: &'static str,
+        chart_key: &'static str,
+        got: String,
+    },
+
     #[error(
         "{0}_TLS_ENABLED is set but {0}_TLS_CERT_FILE names no certificate. TLS was \
          asked for, so this is a deployment mistake rather than a reason to open a \
@@ -142,10 +167,14 @@ pub struct ServeTls {
 impl ServeTls {
     /// Read the listener's transport configuration from the environment.
     ///
-    /// `Ok(None)` is the ordinary answer today: TLS is opt-in, so an
-    /// unconfigured deployment serves in cleartext exactly as before.
-    pub fn from_env(prefix: &'static str) -> Result<Option<Self>, ServeTlsError> {
-        Self::from_lookup(prefix, |key| std::env::var(key).ok())
+    /// `chart_key` is the chart value this binary's refusal names beside the
+    /// variable, so an operator reading the boot log is told which file to
+    /// edit as well as which variable is wrong (ADR-0845).
+    pub fn from_env(
+        prefix: &'static str,
+        chart_key: &'static str,
+    ) -> Result<Option<Self>, ServeTlsError> {
+        Self::from_lookup(prefix, chart_key, |key| std::env::var(key).ok())
     }
 
     /// The same decision, over an injected lookup.
@@ -155,8 +184,17 @@ impl ServeTls {
     /// decision that picks between an encrypted listener and a cleartext one
     /// could not be tested at all without this. The same shape
     /// [`crate::upstream::UpstreamTls::from_lookup`] already uses.
+    ///
+    /// **ADR-0845: no compiled-in default.** `{prefix}_TLS_ENABLED` must be
+    /// stated as exactly `"1"` or `"0"`; anything else — including absence —
+    /// refuses the boot naming the variable AND `chart_key`, rather than
+    /// falling back to either transport. "1"/"0" are read literally, never
+    /// "true"/"false"/"yes"/"no": a permissive parse is how a setting meant to
+    /// be off ends up on, and this flag is the cut-over's revert lever, so a
+    /// lever that moves on the wrong input is not one.
     pub fn from_lookup(
         prefix: &'static str,
+        chart_key: &'static str,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Option<Self>, ServeTlsError> {
         let get = |suffix: &str| {
@@ -165,24 +203,31 @@ impl ServeTls {
                 .filter(|v| !v.is_empty())
         };
 
-        // Exactly "1". A permissive parse here — "0", "false" and "no" all
-        // enabling it — is how a setting meant to be off ends up on, and the
-        // reverse mistake is worse: this flag is the revert lever for the
-        // cut-over, and a lever that does not move is not one.
-        if get("TLS_ENABLED").as_deref() != Some("1") {
-            if get("TLS_CERT_FILE").is_some() || get("TLS_KEY_FILE").is_some() {
-                // NOT an error. Leaving the certificate in place while the flag
-                // is off is exactly how the cut-over gets reverted, so refusing
-                // it would make the lever unusable. It is still worth a line: a
-                // deployment that believes it is encrypted and is not should be
-                // able to see that from the boot log.
-                tracing::warn!(
-                    prefix,
-                    "a serving certificate is configured but {prefix}_TLS_ENABLED is not \
-                     \"1\", so this service listens in CLEARTEXT"
-                );
+        let enabled = get("TLS_ENABLED");
+        match enabled.as_deref() {
+            Some("1") => {}
+            Some("0") => {
+                if get("TLS_CERT_FILE").is_some() || get("TLS_KEY_FILE").is_some() {
+                    // NOT an error. Leaving the certificate in place while the
+                    // flag is off is exactly how the cut-over gets reverted, so
+                    // refusing it would make the lever unusable. It is still
+                    // worth a line: a deployment that believes it is encrypted
+                    // and is not should be able to see that from the boot log.
+                    tracing::warn!(
+                        prefix,
+                        "a serving certificate is configured but {prefix}_TLS_ENABLED is \
+                         \"0\", so this service listens in CLEARTEXT"
+                    );
+                }
+                return Ok(None);
             }
-            return Ok(None);
+            _ => {
+                return Err(ServeTlsError::NotStated {
+                    var: prefix,
+                    chart_key,
+                    got: enabled.map_or_else(|| "absent".to_string(), |v| format!("{v:?}")),
+                });
+            }
         }
 
         Ok(Some(Self {
@@ -264,146 +309,4 @@ pub fn builder(tls: Option<&ServeTls>) -> Result<Server, ServeTlsError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// SENTINELS: nothing in `serve.rs` could produce either of them, so a test
-    /// that sees one saw it travel from the lookup.
-    const SENTINEL_CERT: &str = "/etc/yadgar/pangolin-7c21/serving.crt";
-    const SENTINEL_KEY: &str = "/etc/yadgar/pangolin-7c21/serving.key";
-
-    fn lookup<'a>(
-        pairs: &'a [(&'static str, &'static str)],
-    ) -> impl Fn(&str) -> Option<String> + 'a {
-        move |key| {
-            pairs
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.to_string())
-        }
-    }
-
-    /// THE DEFAULT, and the property the whole change is built around: nothing
-    /// configured means the cleartext listener, unchanged.
-    #[test]
-    fn nothing_configured_means_no_tls() {
-        assert_eq!(ServeTls::from_lookup(LISTEN, lookup(&[])).unwrap(), None);
-    }
-
-    /// A certificate without the flag is the REVERTED state, not an error. The
-    /// flag is the lever; leaving the paths in place is how it gets pulled back.
-    #[test]
-    fn a_certificate_alone_does_not_enable_tls() {
-        let vars = [
-            ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
-            ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
-        ];
-        assert_eq!(ServeTls::from_lookup(LISTEN, lookup(&vars)).unwrap(), None);
-    }
-
-    /// Anything but "1" is off. A permissive parse is how a setting meant to be
-    /// off ends up on — and here also how one meant to be revertible stops
-    /// being.
-    #[test]
-    fn only_exactly_one_enables_tls() {
-        for value in ["0", "false", "no", "true", "yes", "", " "] {
-            let vars = [
-                ("LISTEN_TLS_ENABLED", value),
-                ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
-                ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
-            ];
-            assert_eq!(
-                ServeTls::from_lookup(LISTEN, lookup(&vars)).unwrap(),
-                None,
-                "{value:?} must not enable TLS"
-            );
-        }
-    }
-
-    /// THE FAILURE THAT MUST NOT DEGRADE. Asking for TLS and naming no
-    /// certificate is a deployment mistake, and the answer to it is an error
-    /// rather than a plaintext listener.
-    #[test]
-    fn asking_for_tls_without_a_certificate_is_an_error() {
-        for vars in [
-            vec![
-                ("LISTEN_TLS_ENABLED", "1"),
-                ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
-            ],
-            vec![
-                ("LISTEN_TLS_ENABLED", "1"),
-                ("LISTEN_TLS_CERT_FILE", ""),
-                ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
-            ],
-            vec![
-                ("LISTEN_TLS_ENABLED", "1"),
-                ("LISTEN_TLS_CERT_FILE", "   "),
-                ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
-            ],
-        ] {
-            assert!(
-                matches!(
-                    ServeTls::from_lookup(LISTEN, lookup(&vars)),
-                    Err(ServeTlsError::NoCertFile("LISTEN"))
-                ),
-                "{vars:?} must be refused, not silently downgraded"
-            );
-        }
-    }
-
-    /// The same for the key. Half a pair is not an identity, and the message
-    /// has to name the half that is missing.
-    #[test]
-    fn asking_for_tls_without_a_private_key_is_an_error() {
-        for vars in [
-            vec![
-                ("LISTEN_TLS_ENABLED", "1"),
-                ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
-            ],
-            vec![
-                ("LISTEN_TLS_ENABLED", "1"),
-                ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
-                ("LISTEN_TLS_KEY_FILE", "   "),
-            ],
-        ] {
-            assert!(
-                matches!(
-                    ServeTls::from_lookup(LISTEN, lookup(&vars)),
-                    Err(ServeTlsError::NoKeyFile("LISTEN"))
-                ),
-                "{vars:?} must be refused, not silently downgraded"
-            );
-        }
-    }
-
-    /// Both paths reach the settings, proved with names the module could not
-    /// have chosen for itself.
-    #[test]
-    fn the_certificate_and_the_key_both_arrive() {
-        let vars = [
-            ("LISTEN_TLS_ENABLED", "1"),
-            ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
-            ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
-        ];
-        let tls = ServeTls::from_lookup(LISTEN, lookup(&vars))
-            .unwrap()
-            .expect("a flag, a certificate and a key enable TLS");
-        assert_eq!(tls.cert_file(), Path::new(SENTINEL_CERT));
-        assert_eq!(tls.key_file(), Path::new(SENTINEL_KEY));
-    }
-
-    /// The prefix is what selects the variables, so the upstream's transport
-    /// cannot configure the listener. `PROJECT_DB_TLS_*` is a real setting in this
-    /// process — [`crate::upstream`] reads it — which is what makes this worth
-    /// pinning rather than obvious.
-    #[test]
-    fn the_upstreams_variables_do_not_configure_the_listener() {
-        let vars = [
-            ("PROJECT_DB_TLS_ENABLED", "1"),
-            ("PROJECT_DB_TLS_CA_FILE", SENTINEL_CERT),
-            ("TLS_ENABLED", "1"),
-            ("TLS_CERT_FILE", SENTINEL_CERT),
-        ];
-        assert_eq!(ServeTls::from_lookup(LISTEN, lookup(&vars)).unwrap(), None);
-    }
-}
+mod tests;

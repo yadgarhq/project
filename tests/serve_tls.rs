@@ -218,7 +218,7 @@ impl Drop for TempPem {
 fn serve_tls(cert: &Path, key: &Path) -> ServeTls {
     let cert = cert.display().to_string();
     let key = key.display().to_string();
-    ServeTls::from_lookup(LISTEN, |k| match k {
+    ServeTls::from_lookup(LISTEN, serve::CHART_KEY, |k| match k {
         "LISTEN_TLS_ENABLED" => Some("1".to_string()),
         "LISTEN_TLS_CERT_FILE" => Some(cert.clone()),
         "LISTEN_TLS_KEY_FILE" => Some(key.clone()),

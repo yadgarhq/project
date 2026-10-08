@@ -117,3 +117,111 @@ block.
       "operator" "KEDA"
       "toggle" "autoscaling.enabled") }}
 {{- end }}
+
+{{/*
+`tls` AND `tls.enabled`, REFUSED BEFORE `templates/deployment.yaml` RENDERS
+THEM (ADR-0845, ledger 965 K-1). The binary has NO compiled-in default for
+`LISTEN_TLS_ENABLED`: it refuses the boot on anything but exactly "1" or
+"0". `templates/deployment.yaml` renders it UNCONDITIONALLY, as
+`ternary "1" "0" .Values.tls.enabled`, so a non-bool value must be refused
+HERE — `ternary` on a non-bool is a raw Go error on a value that names no
+key, measured on helm 4.3.0.
+
+`values.schema.json`'s `required` + `type: boolean` catches every shape at
+the LEAF, measured rather than assumed: `tls` missing `enabled` entirely,
+`tls: {enabled: null}` (helm deletes a null-valued key any source
+declares, which lands at the schema step exactly like "never declared"),
+and `tls: {enabled: "true"}` (the wrong type) all refuse at the schema
+step with its own message, before this guard ever runs — this chart ships
+NO default for `tls.enabled` to coalesce against (ADR-0845), so there is
+no default left for a null to survive against either. What this guard
+owns is the one shape the schema's nested `properties`/`required` cannot
+see at all: `tls` ITSELF being null or not a map, which those keywords
+never inspect because they only apply when the instance IS an object.
+`tls: null` and `tls: "x"` are refused HERE; a non-bool or absent
+`tls.enabled` never reaches this guard's own `hasKey`/`kindIs "bool"` arms
+on the normal `helm template`/`helm install` path — the schema answers
+first — so those two arms exist only for `--disable-openapi-validation`.
+*/}}
+{{- if not (kindIs "map" .Values.tls) }}
+{{- fail (printf (join "" (list
+      "project: `tls` must be a map and is %s (%s). `tls.enabled` is read from inside "
+      "it and renders LISTEN_TLS_ENABLED unconditionally (ADR-0845). Write `tls:` as a "
+      "block, with `enabled: true` or `enabled: false` inside it."))
+      (kindOf .Values.tls) (toJson .Values.tls)) }}
+{{- end }}
+{{- if not (hasKey .Values.tls "enabled") }}
+{{- fail (join "" (list
+      "project: `tls.enabled` is absent. It renders LISTEN_TLS_ENABLED (ADR-0845), which "
+      "has no compiled-in default anywhere in this binary, so this chart must never "
+      "leave it unstated. Write `tls.enabled: true` or `tls.enabled: false`.")) }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.tls.enabled) }}
+{{- fail (printf (join "" (list
+      "project: `tls.enabled` must be true or false and is %s (%s). It renders "
+      "LISTEN_TLS_ENABLED unconditionally (ADR-0845), and the binary refuses the boot "
+      "on anything but exactly \"1\" or \"0\" — a string, number, map or list here "
+      "would either crash the render or hand the binary a value it cannot read as "
+      "either. Write the bare word `true` or `false`."))
+      (kindOf .Values.tls.enabled) (toJson .Values.tls.enabled)) }}
+{{- end }}
+
+{{/* The dial's own copy of the same three checks, naming PROJECT_DB_TLS_ENABLED. */}}
+{{- if not (kindIs "map" .Values.projectDb.tls) }}
+{{- fail (printf (join "" (list
+      "project: `projectDb.tls` must be a map and is %s (%s). `projectDb.tls.enabled` "
+      "is read from inside it and renders PROJECT_DB_TLS_ENABLED unconditionally "
+      "(ADR-0845). Write `projectDb.tls:` as a block, with `enabled: true` or "
+      "`enabled: false` inside it."))
+      (kindOf .Values.projectDb.tls) (toJson .Values.projectDb.tls)) }}
+{{- end }}
+{{- if not (hasKey .Values.projectDb.tls "enabled") }}
+{{- fail (join "" (list
+      "project: `projectDb.tls.enabled` is absent. It renders PROJECT_DB_TLS_ENABLED "
+      "(ADR-0845), which has no compiled-in default anywhere in this binary, so this "
+      "chart must never leave it unstated. Write `projectDb.tls.enabled: true` or "
+      "`projectDb.tls.enabled: false`.")) }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.projectDb.tls.enabled) }}
+{{- fail (printf (join "" (list
+      "project: `projectDb.tls.enabled` must be true or false and is %s (%s). It "
+      "renders PROJECT_DB_TLS_ENABLED unconditionally (ADR-0845), and the binary "
+      "refuses the boot on anything but exactly \"1\" or \"0\" — a string, number, "
+      "map or list here would either crash the render or hand the binary a value it "
+      "cannot read as either. Write the bare word `true` or `false`."))
+      (kindOf .Values.projectDb.tls.enabled) (toJson .Values.projectDb.tls.enabled)) }}
+{{- end }}
+
+{{/*
+`tls.clientAuth`, WHEN PRESENT (B-U5E, ledger 965 K-8 step 1 — the folded
+expand). The schema declares this key but no binary in this repository
+reads it yet: `serve.rs` builds server-only TLS, with no
+`client_ca_root`. So this is validated for SHAPE when a values file sets
+it, and refused outright for "optional" or "required" — the only value
+this chart's current binary can honestly carry is "off" — until B-U5's
+contract release adopts mutual TLS on the listener and lifts the refusal.
+An absent `tls.clientAuth` is UNCHECKED: it is not required yet, and
+`templates/deployment.yaml` renders nothing for it, which is what keeps
+this release render-neutral against origin/main.
+*/}}
+{{- if hasKey .Values.tls "clientAuth" }}
+{{- if not (kindIs "string" .Values.tls.clientAuth) }}
+{{- fail (printf (join "" (list
+      "project: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
+      "\"required\") and is %s (%s). YAML reads a bare `off` as the boolean `false` "
+      "(YAML 1.1's typed scalars), which is almost certainly how this value became "
+      "a bool rather than a string: write `clientAuth: \"off\"`, quoted."))
+      (kindOf .Values.tls.clientAuth) (toJson .Values.tls.clientAuth)) }}
+{{- end }}
+{{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}
+{{- fail (printf "project: `tls.clientAuth` must be \"off\", \"optional\" or \"required\" and is %s." (toJson .Values.tls.clientAuth)) }}
+{{- end }}
+{{- if ne .Values.tls.clientAuth "off" }}
+{{- fail (printf (join "" (list
+      "project: `tls.clientAuth: %s` is not enforced yet. This chart version renders "
+      "LISTEN_TLS_CLIENT_AUTH, but no binary in this repository reads it (B-U5E, "
+      "ledger 965) — the contract release that adopts mutual TLS on this listener "
+      "(B-U5) is what lifts this refusal. Only `off` is accepted until then."))
+      .Values.tls.clientAuth) }}
+{{- end }}
+{{- end }}

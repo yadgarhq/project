@@ -272,8 +272,30 @@ def red_api_versions(declared: Iterable[str], under_test: str) -> tuple[str, ...
     ) + FILLER_API_VERSIONS
 
 
+def ci_values_flags(chart: Path) -> tuple[str, ...]:
+    """`-f <chart>/ci/values.yaml`, when that file exists, else nothing.
+
+    THE SAME CONVENTION `yadgarhq/actions`' `helm-lint` hook reads through
+    `chart_values_override.py` (ADR-0845, ledger 965, unit C-A2): every bare
+    `helm template`/`helm lint` in this suite passes it too, so a chart copy
+    in a tmp_path fixture — which carries its own copied `ci/values.yaml` —
+    renders under the same values this repository's CI does.
+
+    LOAD-BEARING, NOT A CONVENIENCE: `chart/values.yaml` ships NO default
+    for `tls.enabled` or `projectDb.tls.enabled` (ADR-0845 — a chart
+    default would be exactly the compiled-in default the ADR forbids, one
+    layer up), so a bare `helm template`/`helm lint` with no values file at
+    all now refuses at the schema. Every case in this file that wants a
+    DIFFERENT value for either key overrides it explicitly (`--set` or
+    `-f`, applied after this flag, so it wins); a case that wants the
+    chart to render AT ALL relies on this.
+    """
+    path = chart / "ci" / "values.yaml"
+    return ("-f", str(path)) if path.is_file() else ()
+
+
 def render(chart: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return helm("template", CHART_NAME, str(chart), *arguments)
+    return helm("template", CHART_NAME, str(chart), *ci_values_flags(chart), *arguments)
 
 
 def objects(stdout: str) -> list[dict]:

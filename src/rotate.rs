@@ -36,11 +36,12 @@
 //! # WHY THE SET IS A FUNCTION AND NOT A RUN OF STATEMENTS IN `main`
 //!
 //! It used to be two builder calls in `main.rs`, forty lines apart. No test in
-//! this repository spawns the binary, so deleting either of them compiled,
-//! passed the whole suite, and shipped a process that would never notice that
-//! file rotating. `tests/tls_rotation.rs` could not catch it either: it rebuilt
-//! the same assembly by hand, so `main.rs` and the test could disagree while
-//! both stayed green.
+//! this repository spawned the binary then, so deleting either of them
+//! compiled, passed the whole suite, and shipped a process that would never
+//! notice that file rotating. `tests/tls_rotation.rs` could not catch it
+//! either: it rebuilt the same assembly by hand, so `main.rs` and the test
+//! could disagree while both stayed green. `tests/exit_chain.rs` spawns the
+//! binary now (ledger 748).
 //!
 //! [`watch_set`] is the one expression that names this service's material, and
 //! `main.rs` calls it rather than repeating it. `tests/assembly.rs` calls the
