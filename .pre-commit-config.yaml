@@ -47,7 +47,13 @@ repos:
     # render must pass) — unrelated hook ids added in the same range
     # (`hermetic-git`, `seed-front-matter`, `seed-no-ask-prompt`) are not
     # referenced below; ADR-0577 is why that is inert rather than a gap.
-    rev: v1.31.0
+    #
+    # v1.31.0 -> v1.34.0 (ledger 925, unit B-U5). `boot-reads-watched` at
+    # v1.34.0 accepts `ADR-0523-LIBRARY-WATCHED` on `watch_set`: this
+    # repository's only direct boot read left `src/` with the local
+    # `ServeTls`, so the older gate judged zero reads and refused, while the
+    # files are still read — and watched — by `yadgar_lifecycle::serve_tls`.
+    rev: v1.34.0
     hooks:
       - id: gitleaks
       - id: prettier

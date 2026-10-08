@@ -214,146 +214,199 @@ def test_projectdb_tls_enabled_false_renders_the_variable_too(tmp_path):
     assert 'name: PROJECT_DB_TLS_ENABLED\n              value: "0"' in result.stdout
 
 
-# ── `tls.clientAuth` (B-U5E, folded expand) — nested under `tls.enabled` ──
+# ── `tls.clientAuth` (B-U5 contract, ledger 925): REQUIRED, NO DEFAULT ─────
+#
+# The binary reads `LISTEN_TLS_CLIENT_AUTH` whether or not TLS is on, and an
+# absent value refuses the boot (ADR-0854, `yadgar_lifecycle::serve_tls`). So
+# the chart renders it UNCONDITIONALLY — on both branches of `tls.enabled`, in
+# the expand's position — and refuses an absent key. The schema carries only
+# `required` (ruling R1, ADR-0847): an absent key is the schema's refusal, and
+# every SHAPE refusal — a bare `off`, a non-string, an unknown value — is
+# `templates/render-checks.yaml`'s named sentence on the normal path.
+#
+# The CA env, mount and volume stay gated on `tls.enabled` AND a truthy
+# `tls.clientCaSecret` (B-U5E convention rules 3-4): with `off` there is
+# nothing to verify against, and with TLS off there is no handshake to verify.
+
+LISTENER_ON = ("--set", "tls.enabled=true", "--set", "tls.certSecret=x")
+CA_SECRET = ("--set", "tls.clientCaSecret=caller-ca", "--set", "tls.clientCaSecretKey=ca.crt")
+CLIENT_AUTH_ENV = 'name: LISTEN_TLS_CLIENT_AUTH\n              value: "{}"'
 
 
-def test_client_auth_absent_is_render_neutral(tmp_path):
-    """Unset renders nothing for it, whether `tls.enabled` is true or false —
-    the whole point of an expand (K-8)."""
-    result = render(CHART, "--set", "tls.enabled=true", "--set", "tls.certSecret=x")
-    assert result.returncode == 0, result.stderr
-    assert "LISTEN_TLS_CLIENT_AUTH" not in result.stdout
-    assert "LISTEN_TLS_CLIENT_CA_FILE" not in result.stdout
-    assert "name: client-ca" not in result.stdout
+def render_without_schema(chart, *arguments):
+    """`render` with helm's schema validation OFF, so the shape reaches
+    `templates/render-checks.yaml` and the chart's OWN sentence is what an
+    operator reads. Both helm 3.18.4 and 4.3.0 take the flag."""
+    return render(chart, "--skip-schema-validation", *arguments)
 
 
-def test_client_auth_present_but_tls_disabled_renders_nothing(tmp_path):
-    """Mutual TLS on the listener is meaningless without the encrypted
-    transport it runs inside (convention ruling 3): `tls.enabled: false`
-    must render no client-auth env at all, however `clientAuth` is set."""
-    result = render(
-        CHART,
-        "--set",
-        "tls.enabled=false",
-        "--set-string",
-        "tls.clientAuth=off",
+def stated_values_without_client_auth(tmp_path, enabled: str) -> tuple:
+    """A chart copy with no `ci/values.yaml`, and an overlay stating every
+    OTHER required key — so `tls.clientAuth` is the only thing absent."""
+    chart = chart_without_ci_override(tmp_path)
+    values = overlay(
+        f"tls:\n  enabled: {enabled}\n  certSecret: x\nprojectDb:\n  tls:\n    enabled: false\n",
+        tmp_path / "values",
     )
-    assert result.returncode == 0, result.stderr
-    assert "LISTEN_TLS_CLIENT_AUTH" not in result.stdout
+    return chart, values
 
 
-def test_client_auth_off_is_the_only_accepted_value(tmp_path):
-    result = render(
-        CHART,
-        "--set",
-        "tls.enabled=true",
-        "--set",
-        "tls.certSecret=x",
-        "--set-string",
-        "tls.clientAuth=off",
-    )
-    assert result.returncode == 0, result.stderr
-    assert 'name: LISTEN_TLS_CLIENT_AUTH\n              value: "off"' in result.stdout
+def test_ci_values_state_client_auth_off_quoted():
+    """`chart/ci/values.yaml` is what every shared gate renders with, so it
+    must state the key — as the STRING "off", since a bare `off` is YAML 1.1's
+    boolean false."""
+    import yaml
+
+    ci = yaml.safe_load((CHART / "ci" / "values.yaml").read_text())
+    assert ci["tls"]["clientAuth"] == "off"
+
+
+def test_client_auth_absent_refuses_at_the_schema(tmp_path):
+    for enabled in ("true", "false"):
+        chart, values = stated_values_without_client_auth(tmp_path / enabled, enabled)
+        result = render(chart, "-f", str(values))
+        assert result.returncode != 0, result.stdout
+        assert SCHEMA_WRAPPER in result.stderr, result.stderr
+        assert "tls" in result.stderr and "clientAuth" in result.stderr, result.stderr
+
+
+def test_client_auth_absent_refuses_at_the_template_guard(tmp_path):
+    """The same absence with the schema skipped: the chart's own sentence,
+    naming the key and the variable, with TLS on and with TLS off."""
+    for enabled in ("true", "false"):
+        chart, values = stated_values_without_client_auth(tmp_path / enabled, enabled)
+        result = render_without_schema(chart, "-f", str(values))
+        assert result.returncode != 0, result.stdout
+        assert "project: `tls.clientAuth` is absent" in result.stderr, result.stderr
+        assert "LISTEN_TLS_CLIENT_AUTH" in result.stderr, result.stderr
+        assert "has no default (ADR-0845)" in result.stderr, result.stderr
 
 
 def test_client_auth_unquoted_off_is_refused_by_name(tmp_path):
-    """YAML 1.1 reads a bare `off` as the boolean `false` — the exact
-    gotcha this chart's refusal names, so an operator who forgets to quote
-    it is told why rather than meeting a bare type mismatch."""
+    """YAML 1.1 reads a bare `off` as the boolean `false` — the exact gotcha
+    the chart's refusal names, so an operator who forgets to quote it is told
+    why rather than meeting a bare type mismatch. Schema validation is ON:
+    the schema must not pre-empt this sentence (ruling R1)."""
     values = overlay("tls:\n  enabled: true\n  certSecret: x\n  clientAuth: off\n", tmp_path)
     result = render(CHART, "-f", str(values))
     assert result.returncode != 0, result.stdout
+    assert SCHEMA_WRAPPER not in result.stderr, result.stderr
     assert "`tls.clientAuth` must be a quoted string" in result.stderr, result.stderr
     assert 'write `clientAuth: "off"`' in result.stderr, result.stderr
 
 
-def test_client_auth_optional_is_refused_as_not_enforced_yet(tmp_path):
-    result = render(
-        CHART, "--set", "tls.enabled=true", "--set-string", "tls.clientAuth=optional"
-    )
+def test_client_auth_non_string_is_refused_by_name(tmp_path):
+    values = overlay("tls:\n  enabled: true\n  certSecret: x\n  clientAuth: 3\n", tmp_path)
+    result = render(CHART, "-f", str(values))
     assert result.returncode != 0, result.stdout
-    assert "tls.clientAuth: optional" in result.stderr, result.stderr
-    assert "not enforced yet" in result.stderr, result.stderr
-    assert "B-U5" in result.stderr, result.stderr
+    assert SCHEMA_WRAPPER not in result.stderr, result.stderr
+    assert "`tls.clientAuth` must be a quoted string" in result.stderr, result.stderr
 
 
-def test_client_auth_required_is_refused_as_not_enforced_yet(tmp_path):
-    result = render(
-        CHART, "--set", "tls.enabled=true", "--set-string", "tls.clientAuth=required"
-    )
+def test_client_auth_unknown_value_is_refused_by_name(tmp_path):
+    result = render(CHART, *LISTENER_ON, "--set-string", "tls.clientAuth=sometimes")
     assert result.returncode != 0, result.stdout
-    assert "not enforced yet" in result.stderr, result.stderr
-
-
-def test_client_auth_unknown_value_is_refused_for_its_shape(tmp_path):
-    result = render(
-        CHART, "--set", "tls.enabled=true", "--set-string", "tls.clientAuth=sometimes"
-    )
-    assert result.returncode != 0, result.stdout
+    assert SCHEMA_WRAPPER not in result.stderr, result.stderr
     assert '"off", "optional" or "required"' in result.stderr, result.stderr
-    assert "not enforced yet" not in result.stderr, (
-        "an unrecognised value was refused as if it were a disabled contract "
-        f"value, instead of for its own shape: {result.stderr}"
+    assert "LISTEN_TLS_CLIENT_AUTH" in result.stderr, result.stderr
+
+
+def test_restoring_a_schema_enum_reddens_the_bare_off_sentence(tmp_path):
+    """MUTATION CHECK (ruling R1): an `enum` on `tls.clientAuth` in the
+    schema pre-empts the render check, so the named bare-`off` sentence is
+    never reached — this is the property the untyped leaf protects."""
+    import json
+
+    chart_copy = tmp_path / "chart"
+    shutil.copytree(CHART, chart_copy)
+    schema_path = chart_copy / "values.schema.json"
+    schema = json.loads(schema_path.read_text())
+    schema["properties"]["tls"]["properties"]["clientAuth"] = {"enum": ["off", "optional", "required"]}
+    schema_path.write_text(json.dumps(schema))
+    values = overlay("tls:\n  enabled: true\n  certSecret: x\n  clientAuth: off\n", tmp_path / "v")
+    result = render(chart_copy, "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert "`tls.clientAuth` must be a quoted string" not in result.stderr, (
+        "with an enum the schema should answer first; if the sentence still "
+        "appears, the bare-off test above no longer proves the schema is untyped"
     )
 
 
-def test_client_ca_secret_set_renders_the_ca_file_env_and_mount(tmp_path):
-    """BOTH gates must be satisfied: `clientAuth` present AND `clientCaSecret`
-    truthy. This case states both."""
-    result = render(
-        CHART,
-        "--set",
-        "tls.enabled=true",
-        "--set",
-        "tls.certSecret=x",
-        "--set-string",
-        "tls.clientAuth=off",
-        "--set",
-        "tls.clientCaSecret=caller-ca",
-        "--set",
-        "tls.clientCaSecretKey=ca.crt",
-    )
+def test_client_auth_off_renders_with_tls_on():
+    result = render(CHART, *LISTENER_ON, "--set-string", "tls.clientAuth=off")
+    assert result.returncode == 0, result.stderr
+    assert CLIENT_AUTH_ENV.format("off") in result.stdout
+
+
+def test_client_auth_off_renders_with_tls_off_too():
+    """UNCONDITIONAL: the binary refuses an absent `LISTEN_TLS_CLIENT_AUTH`
+    even on a cleartext listener, so `tls.enabled: false` must render it."""
+    result = render(CHART, "--set", "tls.enabled=false", "--set-string", "tls.clientAuth=off")
+    assert result.returncode == 0, result.stderr
+    assert CLIENT_AUTH_ENV.format("off") in result.stdout
+    assert "LISTEN_TLS_CLIENT_CA_FILE" not in result.stdout
+
+
+def test_verifying_modes_render_the_mode_and_the_ca(tmp_path):
+    """The expand's "not enforced yet" refusal is LIFTED: `optional` and
+    `required` render, with the CA env, mount and volume."""
+    for mode in ("optional", "required"):
+        result = render(CHART, *LISTENER_ON, *CA_SECRET, "--set-string", f"tls.clientAuth={mode}")
+        assert result.returncode == 0, result.stderr
+        assert "not enforced yet" not in result.stderr
+        assert CLIENT_AUTH_ENV.format(mode) in result.stdout
+        assert (
+            "name: LISTEN_TLS_CLIENT_CA_FILE\n              value: /var/run/config/client-ca/ca.crt"
+            in result.stdout
+        )
+        assert "mountPath: /var/run/config/client-ca" in result.stdout
+        assert "secretName: caller-ca" in result.stdout
+
+
+def test_verifying_mode_without_a_ca_secret_is_refused(tmp_path):
+    """The binary refuses `optional`/`required` with no CA file to verify
+    against; the chart refuses the same values before a pod crash-loops."""
+    for mode in ("optional", "required"):
+        result = render(CHART, *LISTENER_ON, "--set-string", f"tls.clientAuth={mode}")
+        assert result.returncode != 0, result.stdout
+        assert f"`tls.clientAuth: {mode}` verifies callers" in result.stderr, result.stderr
+        assert "`tls.clientCaSecret`" in result.stderr, result.stderr
+
+
+def test_verifying_mode_with_tls_off_is_refused(tmp_path):
+    """A cleartext listener cannot verify a caller; the binary refuses it, so
+    the chart does too, naming both keys."""
+    for mode in ("optional", "required"):
+        result = render(
+            CHART, "--set", "tls.enabled=false", *CA_SECRET, "--set-string", f"tls.clientAuth={mode}"
+        )
+        assert result.returncode != 0, result.stdout
+        assert f"`tls.clientAuth: {mode}` needs `tls.enabled: true`" in result.stderr, result.stderr
+
+
+def test_client_ca_secret_set_renders_the_ca_file_env_and_mount():
+    result = render(CHART, *LISTENER_ON, *CA_SECRET, "--set-string", "tls.clientAuth=off")
     assert result.returncode == 0, result.stderr
     assert "LISTEN_TLS_CLIENT_CA_FILE" in result.stdout
     assert "name: client-ca" in result.stdout
     assert "secretName: caller-ca" in result.stdout
 
 
-def test_client_ca_secret_set_but_client_auth_absent_renders_nothing(tmp_path):
-    """A CA bundle named with no `clientAuth` key describes a deployment
-    that staged a Secret but never actually opted into client auth — the
-    env, the mount and the volume must all stay absent, not just the env."""
-    result = render(
-        CHART,
-        "--set",
-        "tls.enabled=true",
-        "--set",
-        "tls.certSecret=x",
-        "--set",
-        "tls.clientCaSecret=caller-ca",
-        "--set",
-        "tls.clientCaSecretKey=ca.crt",
-    )
+def test_client_ca_secret_with_tls_off_renders_no_mount():
+    """Nested under `tls.enabled` (convention rule 3): a cleartext listener
+    reads no CA, so none is mounted."""
+    result = render(CHART, "--set", "tls.enabled=false", *CA_SECRET, "--set-string", "tls.clientAuth=off")
     assert result.returncode == 0, result.stderr
     assert "LISTEN_TLS_CLIENT_CA_FILE" not in result.stdout
     assert "name: client-ca" not in result.stdout
-    assert "secretName: caller-ca" not in result.stdout
 
 
-def test_client_ca_secret_empty_string_renders_no_mount(tmp_path):
+def test_client_ca_secret_empty_string_renders_no_mount():
     """Truthiness, not `hasKey`: an explicit empty string is the unset
     state, the same rule every other optional Secret name in this chart
     follows, and must not render `secretName: ""`."""
     result = render(
-        CHART,
-        "--set",
-        "tls.enabled=true",
-        "--set",
-        "tls.certSecret=x",
-        "--set-string",
-        "tls.clientAuth=off",
-        "--set-string",
-        "tls.clientCaSecret=",
+        CHART, *LISTENER_ON, "--set-string", "tls.clientAuth=off", "--set-string", "tls.clientCaSecret="
     )
     assert result.returncode == 0, result.stderr
     assert "LISTEN_TLS_CLIENT_CA_FILE" not in result.stdout

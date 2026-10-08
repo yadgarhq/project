@@ -70,7 +70,8 @@ exec "$2""#;
 /// Port 0 on both listeners, because the cases in a target run in parallel.
 /// `PROJECT_DB_HOST` is an address rather than a name, so no case depends on
 /// DNS: the dial is lazy (ADR-0532), so nothing needs to answer on it. Both
-/// `*_TLS_ENABLED` are stated as `"0"` rather than left absent.
+/// `*_TLS_ENABLED` are stated as `"0"` rather than left absent, and so is
+/// `LISTEN_TLS_CLIENT_AUTH` as `off` (ADR-0854: no default, even in cleartext).
 pub fn cleartext_env() -> Vec<(&'static str, &'static str)> {
     vec![
         ("PROJECT_DB_HOST", "127.0.0.1"),
@@ -78,6 +79,7 @@ pub fn cleartext_env() -> Vec<(&'static str, &'static str)> {
         ("LISTEN", "127.0.0.1:0"),
         ("METRICS_LISTEN", "127.0.0.1:0"),
         ("LISTEN_TLS_ENABLED", "0"),
+        ("LISTEN_TLS_CLIENT_AUTH", "off"),
         ("PROJECT_DB_TLS_ENABLED", "0"),
     ]
 }

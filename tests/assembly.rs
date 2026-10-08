@@ -36,7 +36,7 @@ use rcgen::{
 use yadgar_project::rotate::{
     self, Configuration, Presented, CERTIFICATE_NOT_AFTER, WATCHED_FILES_UNREADABLE,
 };
-use yadgar_project::serve::{self, ServeTls};
+use yadgar_project::serve::{self, ServerTls};
 use yadgar_project::upstream::{self, UpstreamTls};
 
 /// The leaf's expiry, and the issuing authority's — DELIBERATELY DIFFERENT and
@@ -235,9 +235,21 @@ fn configuration(body: &str) -> Configuration {
 /// helper naming five paths would prove only that the watcher watches what it is
 /// handed; going through `from_lookup` proves that a deployment's CONFIGURATION
 /// puts them there, which is the half that can silently be wrong.
-fn listener_tls(mount: &Mount) -> ServeTls {
+fn listener_tls(mount: &Mount) -> ServerTls {
+    listener_tls_verifying(mount, "off")
+}
+
+/// [`listener_tls`] with `LISTEN_TLS_CLIENT_AUTH` set to `mode`, and the
+/// mount's `ca.pem` named as `LISTEN_TLS_CLIENT_CA_FILE`. The shared type
+/// drops the CA under `off` and keeps it under `optional` and `required`.
+fn listener_tls_verifying(mount: &Mount, mode: &str) -> ServerTls {
     let vars = [
         ("LISTEN_TLS_ENABLED".to_string(), "1".to_string()),
+        ("LISTEN_TLS_CLIENT_AUTH".to_string(), mode.to_string()),
+        (
+            "LISTEN_TLS_CLIENT_CA_FILE".to_string(),
+            mount.path("ca.pem").display().to_string(),
+        ),
         (
             "LISTEN_TLS_CERT_FILE".to_string(),
             mount.path("tls.pem").display().to_string(),
@@ -247,7 +259,7 @@ fn listener_tls(mount: &Mount) -> ServeTls {
             mount.path("tls-key.pem").display().to_string(),
         ),
     ];
-    ServeTls::from_lookup(serve::LISTEN, serve::CHART_KEY, move |k| {
+    ServerTls::from_lookup(serve::LISTEN, serve::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -336,6 +348,38 @@ fn each_certificate_is_reported_as_the_one_it_is() {
     );
     assert_eq!(inputs.not_after(Presented::Serving), Some(LEAF_NOT_AFTER));
     assert_eq!(inputs.not_after(Presented::Client), Some(CLIENT_NOT_AFTER));
+}
+
+/// THE CLIENT CA JOINS THE WATCH SET EXACTLY WHEN THE LISTENER VERIFIES
+/// (B-U5, ADR-0523). The listener reads the bundle at boot under `optional`
+/// and `required`, so a rotated authority must restart the pod; under `off`
+/// the bundle is neither read nor watched, even when one is configured.
+#[test]
+fn the_client_ca_is_watched_exactly_when_the_listener_verifies() {
+    let mount = Mount::new(&generation("project"));
+    let config = configuration("tlsRotation:\n  pollSeconds: 17\n  splayMaxSeconds: 941\n");
+
+    for mode in ["optional", "required"] {
+        assert_eq!(
+            rotate::watch_set(Some(&listener_tls_verifying(&mount, mode)), None, &config).watched(),
+            vec![
+                mount.path("tls.pem").as_path(),
+                mount.path("tls-key.pem").as_path(),
+                mount.path("ca.pem").as_path(),
+                config.path(),
+            ],
+            "a verifying listener watches its leaf, its key and the client CA bundle"
+        );
+    }
+    assert_eq!(
+        rotate::watch_set(Some(&listener_tls_verifying(&mount, "off")), None, &config).watched(),
+        vec![
+            mount.path("tls.pem").as_path(),
+            mount.path("tls-key.pem").as_path(),
+            config.path(),
+        ],
+        "clientAuth `off` reads no client CA, so it watches none"
+    );
 }
 
 /// EACH HALF CONTRIBUTES ON ITS OWN, AND THE MOUNTED DOCUMENT IS THE ONE MEMBER

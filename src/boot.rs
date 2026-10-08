@@ -31,7 +31,7 @@ use tonic::transport::{Channel, Server};
 use yadgar_lifecycle::{drain_within, shutdown, Drain, DRAIN_BUDGET};
 use yadgar_project::pb::yadgar::project::v1::project_service_server::ProjectServiceServer;
 use yadgar_project::rotate::{self, Inputs, Schedule};
-use yadgar_project::serve::{self, ServeTls, LISTEN};
+use yadgar_project::serve::{self, ServerTls, LISTEN};
 use yadgar_project::service::Project;
 use yadgar_project::upstream::{self, UpstreamTls, PROJECT_DB};
 
@@ -72,7 +72,7 @@ pub struct Prepared {
     pub server: Server,
     /// Retained past its use below so `serve_until_drained` can log whether
     /// the listener is encrypted.
-    pub tls: Option<ServeTls>,
+    pub tls: Option<ServerTls>,
     pub db_host: String,
     pub db_port: u16,
     pub db_tls: Option<UpstreamTls>,
@@ -96,8 +96,14 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // structural rather than tidy: the downgrade this car removes is a listener
     // that opens in cleartext because TLS configuration failed, and with one
     // construction site there is nowhere else to write it.
-    let tls = ServeTls::from_env(LISTEN, serve::CHART_KEY).map_err(|e| e.to_string())?;
-    let server = serve::builder(tls.as_ref()).map_err(|e| e.to_string())?;
+    //
+    // THE CHAIN WALK on both, not `to_string()` (ADR-0591). The shared type
+    // keeps tonic's reason as `source()` under `ServeTlsError::Unusable`,
+    // whose own sentence says only that the identity is unusable; the walk is
+    // what reaches `keys may not be consistent`. `from_env`'s refusals carry
+    // no source, so the walk prints exactly their sentence.
+    let tls = ServerTls::from_env(LISTEN, serve::CHART_KEY).map_err(|e| crate::refusal(&e))?;
+    let server = serve::builder(tls.as_ref()).map_err(|e| crate::refusal(&e))?;
 
     // The HEADLESS Service name (D23). Resolving it yields every ready pod
     // address rather than one virtual IP.
@@ -197,7 +203,7 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
 /// refused before.
 pub async fn serve_until_drained(
     mut server: Server,
-    tls: Option<ServeTls>,
+    tls: Option<ServerTls>,
     channel: Channel,
     watch_inputs: Inputs,
     schedule: Schedule,

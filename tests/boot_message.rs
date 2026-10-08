@@ -49,39 +49,102 @@ fn refusal_without_mounts(vars: &[(&str, &str)]) -> String {
     refusal_line(out.status, &String::from_utf8_lossy(&out.stderr))
 }
 
-/// A TYPED error: `ServeTlsError::NoCertFile`, the first refusal `run` can
-/// reach. Debug of the error would print `NoCertFile("LISTEN")`; Debug of its
-/// sentence printed the sentence in quotes. Display prints the sentence.
+/// A TYPED error: `ServeTlsError::NoServingFile`, the first refusal `run` can
+/// reach with the switch and the mode stated. Debug of the error would print
+/// the variant name; Debug of its sentence printed the sentence in quotes.
+/// Display prints the sentence.
 #[test]
 fn a_typed_refusal_is_printed_as_its_sentence() {
-    let line = refusal_without_mounts(&[("LISTEN_TLS_ENABLED", "1")]);
+    let line = refusal_without_mounts(&[
+        ("LISTEN_TLS_ENABLED", "1"),
+        ("LISTEN_TLS_CLIENT_AUTH", "off"),
+    ]);
     assert!(
-        line.contains("LISTEN_TLS_ENABLED is set but LISTEN_TLS_CERT_FILE names no certificate"),
-        "the refusal must name both variables: {line}"
+        line.contains("LISTEN_TLS_ENABLED is \"1\" but LISTEN_TLS_CERT_FILE is not set"),
+        "the refusal must name both variables"
     );
     assert!(
-        !line.contains("NoCertFile"),
-        "the operator got the Debug variant name, not the sentence: {line}"
+        line.contains("`tls.certSecret`"),
+        "the refusal must name the chart key tls.certSecret"
+    );
+    assert!(
+        !line.contains("NoServingFile"),
+        "the operator got the Debug variant name, not the sentence"
     );
 }
 
 /// ADR-0845 AT THE REAL BOOT PATH, not at the library function alone. This
-/// proves the literal `boot.rs` actually passes to `ServeTls::from_env` —
-/// `serve::CHART_KEY` — reaches the operator correctly, through the compiled
-/// binary `main` runs. A typo'd chart-key literal at that call site (before
-/// `boot.rs` and `src/serve.rs` shared one `pub const` for it) would compile,
-/// pass every `src/` unit test (which construct their own `CHART_KEY` and
-/// never read `boot.rs`'s), and only show up here.
+/// proves the block `boot.rs` actually passes to `ServerTls::from_env` —
+/// `serve::CHART_KEY` — reaches the operator as the exact chart key, through
+/// the compiled binary `main` runs. The shared type appends the leaf, so a
+/// `CHART_KEY` of `"tls.enabled"` would print `tls.enabled.enabled`; the
+/// backticks in the assertion are what tell the two apart.
 #[test]
 fn an_absent_listen_tls_enabled_names_the_chart_key_at_the_real_boot_path() {
     let line = refusal_without_mounts(&[]);
     assert!(
         line.contains("LISTEN_TLS_ENABLED"),
-        "the refusal must name the variable: {line}"
+        "the refusal must name the variable LISTEN_TLS_ENABLED"
     );
     assert!(
-        line.contains("tls.enabled"),
-        "the refusal must name the chart key: {line}"
+        line.contains("`tls.enabled`"),
+        "the refusal must name the chart key tls.enabled exactly"
+    );
+}
+
+/// ADR-0854 AT THE REAL BOOT PATH: an absent `LISTEN_TLS_CLIENT_AUTH` refuses
+/// even a cleartext boot, naming the variable and `tls.clientAuth`.
+#[test]
+fn an_absent_listen_tls_client_auth_names_the_chart_key_at_the_real_boot_path() {
+    let line = refusal_without_mounts(&[("LISTEN_TLS_ENABLED", "0")]);
+    assert!(
+        line.contains("LISTEN_TLS_CLIENT_AUTH is not set"),
+        "the refusal must name the variable LISTEN_TLS_CLIENT_AUTH"
+    );
+    assert!(
+        line.contains("`tls.clientAuth`"),
+        "the refusal must name the chart key tls.clientAuth exactly"
+    );
+}
+
+/// THE LISTENER'S UNUSABLE IDENTITY IS WALKED AT THE REAL BOOT PATH
+/// (ADR-0591). The shared `ServeTlsError::Unusable` keeps tonic's reason one
+/// `source()` hop down, under a head that says only "unusable". `boot.rs`
+/// renders it with `main.rs`'s `refusal`; reverting that call site to
+/// `to_string()` drops `keys may not be consistent` and turns this red.
+#[test]
+fn an_unusable_listener_identity_names_the_reason_at_the_real_boot_path() {
+    let pair = |cn: &str| {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec![cn.to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        (cert.pem(), key.serialize_pem())
+    };
+    let (cert_pem, _) = pair("localhost");
+    let (_, other_key_pem) = pair("localhost");
+    let dir = std::env::temp_dir().join(format!(
+        "yadgar-project-boot-unusable-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert = dir.join("tls.crt");
+    let key = dir.join("tls.key");
+    std::fs::write(&cert, cert_pem).unwrap();
+    std::fs::write(&key, other_key_pem).unwrap();
+    let (cert, key) = (cert.display().to_string(), key.display().to_string());
+
+    let line = refusal_without_mounts(&[
+        ("LISTEN_TLS_ENABLED", "1"),
+        ("LISTEN_TLS_CLIENT_AUTH", "off"),
+        ("LISTEN_TLS_CERT_FILE", cert.as_str()),
+        ("LISTEN_TLS_KEY_FILE", key.as_str()),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        line.contains("keys may not be consistent"),
+        "the refusal must carry the reason under tonic's `transport error`"
     );
 }
 

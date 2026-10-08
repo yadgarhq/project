@@ -1,33 +1,44 @@
 //! The transport this service SERVES on — the other half of [`crate::upstream`].
 //!
 //! `upstream` decides how this service dials `project-db`; this decides what a
-//! caller reaching this service gets. The two are deliberately the same shape —
-//! a flag, file paths, a [`ServeTls::from_lookup`] seam and a refusal rather than
-//! a downgrade — because one idea written two ways in one repository is its own
-//! defect.
+//! caller reaching this service gets.
 //!
-//! # TLS
+//! # TLS, and client authentication, from `yadgar-lifecycle` (ADR-0846)
 //!
-//! **OPT-IN, and OFF unless a deployment asks for it.** With nothing configured
-//! this serves exactly what it has always served, in cleartext. The code ships
-//! first and the cut-over is a separate change that can be reverted on its own.
+//! **ONE IMPLEMENTATION OF A SECURITY CONTROL.** This module held its own
+//! `ServeTls` — a near-identical copy of the one in `iam`, `iam-db`, `task`,
+//! `task-db` and `project-db` — and none of the six called
+//! `ServerTlsConfig::client_ca_root`, so no hop in the estate verified a
+//! client certificate. The type is lifted into
+//! [`yadgar_lifecycle::serve_tls`] and adopted here (B-U5, ledger 925): six
+//! copies of a verifier are how six services come to verify six slightly
+//! different things.
 //!
-//! **Configuration is file paths and a flag, never an issuer-specific resource**
-//! (D80). A certificate and a private key on disk are written by cert-manager in
-//! the reference deployment and by a hand-assembled Secret anywhere else, and
-//! nothing here can tell the difference — which is the point. No CRD, no issuer,
-//! no mesh.
+//! **What this binary reads, and none of it has a default** (ADR-0845,
+//! ADR-0854):
 //!
-//! **A misconfiguration refuses the boot; it never opens a plaintext listener.**
-//! That silent downgrade is the entire defect this change exists to remove, so
-//! [`builder`] is the ONLY place in this binary that constructs a server: the
-//! fallback cannot be reached by forgetting something, only by adding it.
+//! | variable | chart value | values |
+//! | --- | --- | --- |
+//! | `LISTEN_TLS_ENABLED` | `tls.enabled` | exactly `1` or `0` |
+//! | `LISTEN_TLS_CERT_FILE`, `LISTEN_TLS_KEY_FILE` | `tls.certSecret` | paths |
+//! | `LISTEN_TLS_CLIENT_AUTH` | `tls.clientAuth` | exactly `off`, `optional`, `required` |
+//! | `LISTEN_TLS_CLIENT_CA_FILE` | `tls.clientCaSecret` | a path |
 //!
-//! **Server TLS only — this is not mutual TLS.** The listener presents an
-//! identity and asks the caller for none. The seam for the other direction is
-//! tonic's `ServerTlsConfig::client_ca_root` plus one more path, and it is left
-//! unbuilt deliberately: every client would need an issued certificate before it
-//! could be turned on, which is a decision rather than a line of code.
+//! An absent switch or an absent mode refuses the boot, naming the variable
+//! AND the chart key. `off` is the emergency value for client auth; deleting
+//! the variable is a refusal, not a way to turn verification off. `optional`
+//! verifies a certificate a caller presents and admits a caller presenting
+//! none — a staging step, not a control. `required` refuses a caller without
+//! a certificate the mounted authority issued.
+//!
+//! **Configuration is file paths, never an issuer-specific resource** (D80).
+//! cert-manager writes them in the reference deployment and a hand-assembled
+//! Secret anywhere else; nothing here can tell the difference.
+//!
+//! **A misconfiguration refuses the boot; it never opens a plaintext
+//! listener.** [`builder`] is the ONLY place in this binary that constructs a
+//! server, so a cleartext fallback cannot be reached by forgetting something,
+//! only by adding it.
 //!
 //! # Shutdown moved to `yadgar-lifecycle`
 //!
@@ -37,275 +48,39 @@
 //! three: `terminationGracePeriodSeconds` bounds a drain KUBELET started, the
 //! rotation watcher ends the serve on its own, so kubelet's clock never runs and
 //! a budget this process holds is the only thing bounding what follows.
-//!
-//! Why they were in a library rather than in `main` is unchanged, and is the
-//! same reason [`builder`] is: a decision inside a binary entry point is one no
-//! test can reach, and which signals end this process is exactly the kind that
-//! fails silently. This binary listened for SIGINT alone while Kubernetes sends
-//! SIGTERM.
 
-use std::path::{Path, PathBuf};
+use tonic::transport::Server;
 
-use tonic::transport::{Identity, Server, ServerTlsConfig};
-// THE ONE ERROR-CHAIN FLATTENER FOR THE ESTATE (ADR-0591). The body that used to
-// sit below `builder` in this file was one of five — `iam`, `iam-db`, `project-db`,
-// `project-db` and here — byte-identical apart from local names, under TWO
-// names: `chain` in the first two and `describe` in the other three. It is
-// deleted rather than left beside the shared one, because a consolidation that
-// adds a sixth copy without removing the five is worse than none.
-use yadgar_telemetry::diagnose::chain;
+pub use yadgar_lifecycle::serve_tls::{ClientAuth, ServeTlsError, ServerTls, LISTEN};
 
-/// The environment variables this service's own listener is configured from:
-/// `LISTEN_TLS_ENABLED`, `LISTEN_TLS_CERT_FILE` and `LISTEN_TLS_KEY_FILE`.
+/// The chart values block this listener's keys render from. The shared type
+/// appends the leaf to it, so a refusal names `tls.enabled`, `tls.clientAuth`,
+/// `tls.certSecret` or `tls.clientCaSecret` beside the variable (ADR-0845).
 ///
-/// Built from a PREFIX rather than written out three times, so the naming stays
-/// mechanical.
-///
-/// **THE PREFIX NAMES THE THING BEING CONFIGURED, and it is derived rather than
-/// chosen.** `LISTEN` is already the variable holding the address this service
-/// binds, so the listener's transport keys extend a name that exists. A dial is
-/// named for the upstream it reaches, which is why [`crate::upstream`] reads
-/// `PROJECT_DB_TLS_*`. `SERVE` — what this constant used to be — invented a second
-/// word for the listener and so described nothing the process otherwise had, and
-/// `iam` derived `LISTEN` independently for the identical seam. One idea spelled
-/// two ways across the estate is its own defect.
-///
-/// A bare `TLS_ENABLED` is ambiguous between the two directions, which is what
-/// makes a prefix necessary at all — `the_upstreams_variables_do_not_configure_the_listener`
-/// below and `upstream`'s `another_upstreams_variables_do_not_configure_this_one`
-/// pin both halves of that.
-pub const LISTEN: &str = "LISTEN";
-
-/// The chart value [`ServeTls::from_env`]'s refusal names beside
-/// `LISTEN_TLS_ENABLED` (ADR-0845).
-///
-/// **ONE SOURCE, READ BY `boot.rs` AND BY EVERY TEST THAT NAMES IT.** This
-/// used to be a bare `"tls.enabled"` string literal typed out separately at
-/// `boot.rs`'s call site and again inside this module's own test constant —
-/// two places a typo in either one could diverge from the other with
-/// nothing to notice, since the unit tests exercised `from_lookup` with
-/// their OWN copy of the string rather than the one `boot.rs` actually
-/// passes. A single `pub const` removes the duplication rather than
-/// re-checking it.
-pub const CHART_KEY: &str = "tls.enabled";
-
-/// What a deployment got wrong about the transport, before anything is bound.
-///
-/// Every variant is a REFUSAL. There is no variant meaning "carry on in
-/// cleartext", because there is no such outcome.
-#[derive(Debug, thiserror::Error)]
-pub enum ServeTlsError {
-    #[error(
-        "{var}_TLS_ENABLED must be set to exactly \"1\" or \"0\"; ADR-0845 leaves it no \
-         compiled-in default, so this refuses the boot rather than choosing a transport for \
-         it. It is {got}. Set the chart key `{chart_key}` to `true` or `false`, which this \
-         chart renders as \"1\" or \"0\"."
-    )]
-    NotStated {
-        var: &'static str,
-        chart_key: &'static str,
-        got: String,
-    },
-
-    #[error(
-        "{0}_TLS_ENABLED is set but {0}_TLS_CERT_FILE names no certificate. TLS was \
-         asked for, so this is a deployment mistake rather than a reason to open a \
-         plaintext listener — and it is NOT the same as leaving TLS off, which is the \
-         supported way to serve without one. Point {0}_TLS_CERT_FILE at the PEM \
-         certificate this service should present."
-    )]
-    NoCertFile(&'static str),
-
-    #[error(
-        "{0}_TLS_ENABLED is set but {0}_TLS_KEY_FILE names no private key. A \
-         certificate without its key cannot complete a handshake, so this refuses \
-         rather than opening a plaintext listener. Point {0}_TLS_KEY_FILE at the PEM \
-         private key belonging to {0}_TLS_CERT_FILE."
-    )]
-    NoKeyFile(&'static str),
-
-    #[error(
-        "the TLS {what} at {path} could not be read: {source}. TLS was asked for, so \
-         this service refuses to start rather than serving in cleartext. The usual \
-         cause is a Secret that was never mounted, or a key inside it under a \
-         different name than the chart selected."
-    )]
-    Unreadable {
-        what: &'static str,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error(
-        "the TLS certificate at {cert} and the private key at {key} were read but \
-         refused: {detail}. Both files exist, so this is their CONTENT: a PEM that \
-         decodes to no certificate at all, or a certificate that does not belong to \
-         the key beside it — what a half-finished rotation leaves behind. This \
-         service refuses to start rather than serving in cleartext."
-    )]
-    Unusable {
-        cert: PathBuf,
-        key: PathBuf,
-        detail: String,
-    },
-}
-
-/// The identity this service presents: a certificate and its private key, both
-/// as paths on disk.
-///
-/// **No verification domain, unlike [`crate::upstream::UpstreamTls`].** A client
-/// checks the name it dialled against the certificate it was shown; a server
-/// presents what it was given and checks nothing. The asymmetry is real rather
-/// than an omission.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServeTls {
-    cert_file: PathBuf,
-    key_file: PathBuf,
-}
-
-impl ServeTls {
-    /// Read the listener's transport configuration from the environment.
-    ///
-    /// `chart_key` is the chart value this binary's refusal names beside the
-    /// variable, so an operator reading the boot log is told which file to
-    /// edit as well as which variable is wrong (ADR-0845).
-    pub fn from_env(
-        prefix: &'static str,
-        chart_key: &'static str,
-    ) -> Result<Option<Self>, ServeTlsError> {
-        Self::from_lookup(prefix, chart_key, |key| std::env::var(key).ok())
-    }
-
-    /// The same decision, over an injected lookup.
-    ///
-    /// **A seam, because environment variables are process-global.** A test that
-    /// sets one steers every other test running in the same binary, so the
-    /// decision that picks between an encrypted listener and a cleartext one
-    /// could not be tested at all without this. The same shape
-    /// [`crate::upstream::UpstreamTls::from_lookup`] already uses.
-    ///
-    /// **ADR-0845: no compiled-in default.** `{prefix}_TLS_ENABLED` must be
-    /// stated as exactly `"1"` or `"0"`; anything else — including absence —
-    /// refuses the boot naming the variable AND `chart_key`, rather than
-    /// falling back to either transport. "1"/"0" are read literally, never
-    /// "true"/"false"/"yes"/"no": a permissive parse is how a setting meant to
-    /// be off ends up on, and this flag is the cut-over's revert lever, so a
-    /// lever that moves on the wrong input is not one.
-    pub fn from_lookup(
-        prefix: &'static str,
-        chart_key: &'static str,
-        lookup: impl Fn(&str) -> Option<String>,
-    ) -> Result<Option<Self>, ServeTlsError> {
-        let get = |suffix: &str| {
-            lookup(&format!("{prefix}_{suffix}"))
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-
-        let enabled = get("TLS_ENABLED");
-        match enabled.as_deref() {
-            Some("1") => {}
-            Some("0") => {
-                if get("TLS_CERT_FILE").is_some() || get("TLS_KEY_FILE").is_some() {
-                    // NOT an error. Leaving the certificate in place while the
-                    // flag is off is exactly how the cut-over gets reverted, so
-                    // refusing it would make the lever unusable. It is still
-                    // worth a line: a deployment that believes it is encrypted
-                    // and is not should be able to see that from the boot log.
-                    tracing::warn!(
-                        prefix,
-                        "a serving certificate is configured but {prefix}_TLS_ENABLED is \
-                         \"0\", so this service listens in CLEARTEXT"
-                    );
-                }
-                return Ok(None);
-            }
-            _ => {
-                return Err(ServeTlsError::NotStated {
-                    var: prefix,
-                    chart_key,
-                    got: enabled.map_or_else(|| "absent".to_string(), |v| format!("{v:?}")),
-                });
-            }
-        }
-
-        Ok(Some(Self {
-            cert_file: PathBuf::from(
-                get("TLS_CERT_FILE").ok_or(ServeTlsError::NoCertFile(prefix))?,
-            ),
-            key_file: PathBuf::from(get("TLS_KEY_FILE").ok_or(ServeTlsError::NoKeyFile(prefix))?),
-        }))
-    }
-
-    /// The PEM certificate this service presents.
-    pub fn cert_file(&self) -> &Path {
-        &self.cert_file
-    }
-
-    /// The PEM private key belonging to that certificate.
-    pub fn key_file(&self) -> &Path {
-        &self.key_file
-    }
-
-    /// Read both files and hand tonic the pair.
-    ///
-    /// Reading them HERE rather than letting tonic do it is what lets the error
-    /// name WHICH file was wrong. `Identity::from_pem` takes bytes and has no
-    /// idea where they came from, so an operator whose Secret mounted only one
-    /// of the two would otherwise be told that "an identity" was unusable.
-    fn identity(&self) -> Result<Identity, ServeTlsError> {
-        let cert = read(&self.cert_file, "certificate")?;
-        let key = read(&self.key_file, "private key")?;
-        Ok(Identity::from_pem(cert, key))
-    }
-}
-
-fn read(path: &Path, what: &'static str) -> Result<Vec<u8>, ServeTlsError> {
-    // ADR-0523-WATCHED: ServeTls
-    std::fs::read(path).map_err(|source| ServeTlsError::Unreadable {
-        what,
-        path: path.to_path_buf(),
-        source,
-    })
-}
+/// **ONE SOURCE, READ BY `boot.rs` AND BY EVERY TEST THAT NAMES IT.** A string
+/// literal typed out at the call site and again in a test could diverge from
+/// the one `boot.rs` actually passes with nothing to notice.
+pub const CHART_KEY: &str = "tls";
 
 /// Build the gRPC server this service listens with.
 ///
 /// **THE ONLY SERVER CONSTRUCTION IN THIS BINARY, and that is structural rather
-/// than stylistic.** The failure this car exists to remove is a listener that
-/// opens in cleartext because TLS configuration failed. A `Server::builder()`
-/// call anywhere else is a place that downgrade could be written; with one, the
-/// only way to reintroduce it is to add a fallback here, where
-/// `a_tls_listener_refuses_a_cleartext_client` is looking.
+/// than stylistic.** `None` is the cleartext listener, and it is only ever the
+/// answer [`ServerTls::from_env`] gives an EXPLICIT `LISTEN_TLS_ENABLED=0` with
+/// client auth `off`. `Some` is TLS — with the caller verified when the mode
+/// asks for it — or an error, never a cleartext server.
 ///
-/// `None` is the cleartext listener this service has always opened. `Some` is
-/// the same server with an identity, and it returns an error rather than a
-/// cleartext server if that identity is unusable.
+/// **EAGER.** Every file is read and the rustls acceptor and client verifier
+/// are built here, so a bad mount refuses at boot rather than failing a
+/// stranger's first handshake. The error keeps tonic's reason as its
+/// `source()`; `boot.rs` flattens the chain (ADR-0591).
 ///
 /// **ALPN is tonic's, not ours.** `ServerTlsConfig` pushes `h2` onto the
-/// acceptor's protocol list, and a gRPC listener that negotiated anything else
-/// would answer nothing useful. It is verified rather than assumed: tonic's own
-/// client refuses a channel whose negotiated protocol is not `h2`, so the
-/// handshake tests in `tests/serve_tls.rs` fail if it ever stops being offered.
-pub fn builder(tls: Option<&ServeTls>) -> Result<Server, ServeTlsError> {
-    let server = Server::builder();
-    let Some(tls) = tls else {
-        return Ok(server);
-    };
-
-    let identity = tls.identity()?;
-    // EAGER, and before anything binds. `tls_config` builds the rustls acceptor
-    // here — it is what decodes the PEM and checks that the certificate belongs
-    // to the key — so a bad pair is an error at boot rather than a handshake
-    // that fails on a stranger's first connection.
-    server
-        .tls_config(ServerTlsConfig::new().identity(identity))
-        .map_err(|e| ServeTlsError::Unusable {
-            cert: tls.cert_file.clone(),
-            key: tls.key_file.clone(),
-            detail: chain(&e),
-        })
+/// acceptor's protocol list; the handshake tests in `tests/serve_tls.rs` fail
+/// if it ever stops being offered, because tonic's own client refuses a channel
+/// that negotiated anything else.
+pub fn builder(tls: Option<&ServerTls>) -> Result<Server, ServeTlsError> {
+    yadgar_lifecycle::serve_tls::server(tls)
 }
 
 #[cfg(test)]

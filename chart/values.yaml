@@ -90,12 +90,13 @@ projectDb:
     # A NetworkPolicy protects this hop on kind too. ADR-0594, as amended by
     # ADR-0686, ranks mutual TLS and an ingress NetworkPolicy as EQUAL
     # controls — but only where both sides hold a leaf this deployment issued
-    # AND verifies. On this hop that is not yet true: `project-db`'s
-    # `boot::server` builds `ServerTlsConfig` with `.identity(..)` only, never
-    # `.client_ca_root(..)`, so this certificate is not checked. Today the
-    # NetworkPolicy is the only BUILT control on this hop; the certificate
-    # stays load-bearing for availability, per the rest of this note, once
-    # the server side of mutual TLS lands.
+    # AND verifies. `project-db` checks this certificate ONLY when its own
+    # `tls.clientAuth` is `optional` or `required` (the shared
+    # `yadgar_lifecycle::serve_tls` listener, ADR-0846). Under `off` — the
+    # value every deployment states until this hop is cut over — it is not
+    # checked, and the NetworkPolicy is the only control on this hop; the
+    # certificate stays load-bearing for availability, per the rest of this
+    # note, once that hop's `clientAuth` verifies.
     #
     # EMPTY, AND THAT IS ITS OWN LEVER. Turning `enabled` on above encrypts the
     # hop and presents NO identity, exactly as before. Naming a Secret here is a
@@ -161,22 +162,24 @@ tls:
   # and project logs a warning saying it is listening in cleartext, so nobody has
   # to infer it.
   #
-  # OFF, AND NOT YET READ BY ANY BINARY (B-U5E, folded expand). `off`,
-  # `optional` or `required` will one day select whether this listener asks
-  # callers for a certificate; today `templates/render-checks.yaml` refuses
-  # every value but the quoted string `"off"`, because no binary in this
-  # repository builds `ServerTlsConfig::client_ca_root` yet — adopting it is
-  # B-U5's job, in a later, separate release. Left UNSET here on purpose,
-  # matching `values.schema.json`'s own "declared but not shipped" extras:
-  # the template renders LISTEN_TLS_CLIENT_AUTH only when `enabled` is true
-  # AND this key is present, so an unset key renders nothing, which is what
-  # keeps this release's render byte-identical to origin/main's.
+  # `clientAuth`: WHETHER THIS LISTENER VERIFIES ITS CALLERS, AND NO DEFAULT
+  # EITHER (B-U5, ledger 925; ADR-0845 as extended to this knob). The quoted
+  # string `"off"`, `"optional"` or `"required"`, rendered UNCONDITIONALLY as
+  # LISTEN_TLS_CLIENT_AUTH: the binary reads it whether or not `enabled` is
+  # true and refuses the boot without it, so every deployment states it.
+  # QUOTE IT: a bare `off` is YAML 1.1's boolean false, which the schema
+  # refuses. `off` asks callers for nothing. `optional` verifies a
+  # certificate a caller presents and admits one presenting none — a staging
+  # step, not a control. `required` refuses any caller without a certificate
+  # the `clientCaSecret` authority issued. Both verifying modes need
+  # `enabled: true` and `clientCaSecret`, and the render check refuses them
+  # without.
   # clientAuth: "off"
-  # The Secret holding the CA bundle this listener will verify CALLERS
-  # against, once `clientAuth` above is adopted. Unset for the same reason;
-  # an empty string here is also treated as unset — truthiness, not
-  # `hasKey` — so a values override that nulls the Secret name renders
-  # nothing rather than `secretName: ""`.
+  # The Secret holding the CA bundle callers are verified against under
+  # `optional` and `required`. Unset unless a mode verifies; an empty string
+  # is also treated as unset — truthiness, not `hasKey` — so a values
+  # override that nulls the Secret name renders nothing rather than
+  # `secretName: ""`.
   # clientCaSecret: ""
   # The key inside that Secret holding the bundle, mounted as `ca.crt`.
   # clientCaSecretKey: ca.crt
