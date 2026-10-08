@@ -66,20 +66,26 @@ OPEN = ("resources", "rollingUpdate")
 # that `values.yaml` does not declare. Declaring them as leaves turns their
 # parent block from an open map into a closed one with exactly this key.
 #
-# `tls.clientAuth`/`clientCaSecret`/`clientCaSecretKey` are B-U5E's folded
-# expand (ledger 965): `templates/deployment.yaml` reads all three, and
-# `chart/values.yaml` ships none of them — left unset on purpose, so a
-# values file that does not set them renders byte-identical to
-# origin/main's (K-8). `values.schema.json` still has to declare them, or
-# an adopter setting `tls.clientAuth` would be refused by `additionalProperties:
-# false` rather than reaching the render check.
+# `tls.clientCaSecret`/`clientCaSecretKey` name the CA bundle a verifying
+# `tls.clientAuth` reads (B-U5): `templates/deployment.yaml` reads both, and
+# `chart/values.yaml` ships neither — unset unless a mode verifies.
+# `values.schema.json` still has to declare them, or an adopter naming the
+# Secret would be refused by `additionalProperties: false` rather than
+# reaching the render check.
 EXTRA_LEAVES = (
     "image.digest",
     "networkPolicy.scrapeFrom.namespace",
-    "tls.clientAuth",
     "tls.clientCaSecret",
     "tls.clientCaSecretKey",
 )
+
+# THE THIRD REQUIRED KEY WITH NO DEFAULT (B-U5, ledger 925): `tls.clientAuth`
+# is `required` but UNTYPED — no `enum`, no `type` (ADR-0847, coordinator
+# ruling R1). A bare YAML `off` is the boolean false, and the render check's
+# named sentence ("write `clientAuth: \"off\"`, quoted") is what must answer
+# it; a schema type or enum would pre-empt that sentence. Like the two
+# switches it appears nowhere in `chart/values.yaml`, so the oracle injects it.
+REQUIRED_UNTYPED_NO_DEFAULT = ("tls.clientAuth",)
 
 # THE TWO NAMED EXCEPTIONS (ledger 965, ADR-0845): `tls.enabled` and
 # `projectDb.tls.enabled` are the only typed, required leaves this chart's
@@ -158,6 +164,17 @@ def declare_required_no_default(schema: dict, path: str) -> None:
     cursor["required"] = sorted({*cursor.get("required", []), steps[-1]})
 
 
+def declare_required_untyped(schema: dict, path: str) -> None:
+    """`declare_required_no_default`, with an UNTYPED `{}` leaf rather than
+    `{"type": "boolean"}`. Mutates `schema`."""
+    declare_required_no_default(schema, path)
+    cursor = schema
+    steps = path.split(".")
+    for step in steps[:-1]:
+        cursor = cursor["properties"][step]
+    cursor["properties"][steps[-1]] = {}
+
+
 def expected_schema(values: dict) -> dict:
     """The full `properties` / `additionalProperties` shape this chart's schema owes. PURE."""
     schema = expected_node(values, "")
@@ -166,6 +183,8 @@ def expected_schema(values: dict) -> dict:
     schema["properties"].setdefault("global", {})
     for path in REQUIRED_NO_DEFAULT:
         declare_required_no_default(schema, path)
+    for path in REQUIRED_UNTYPED_NO_DEFAULT:
+        declare_required_untyped(schema, path)
     for path in EXTRA_LEAVES:
         declare_extra(schema, path)
     return schema

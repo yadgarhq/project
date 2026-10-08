@@ -95,13 +95,15 @@ fn env_required(key: &str) -> Result<String, String> {
 }
 
 /// The chain walk every refusal that needs one shares — the `project-db` dial
-/// below, and the gRPC server's own bind/serve failure in
-/// `boot::serve_until_drained` — flattened through the estate's one
-/// error-chain walker (ledger 733, ledger 740, ADR-0591) instead of a second
-/// copy per call site.
+/// below, the gRPC server's own bind/serve failure in
+/// `boot::serve_until_drained`, and the listener's unusable identity in
+/// `boot::prepare` (`yadgar_lifecycle::serve_tls::ServeTlsError::Unusable`
+/// keeps tonic's reason as its `source()`) — flattened through the estate's
+/// one error-chain walker (ledger 733, ledger 740, ADR-0591) instead of a
+/// second copy per call site.
 ///
 /// **THE ONLY `to_string()` SITE IN THIS FILE THAT TAKES IT.** Every other
-/// refusal here — `ServeTls`, `UpstreamTls`, `rotate::Configuration` — already
+/// refusal here — `ServerTls::from_env`, `UpstreamTls`, `rotate::Configuration` — already
 /// returns a complete sentence with nothing further under it worth a walk.
 /// `upstream::connect` is different: it returns `yadgar_dial::BalanceError`,
 /// and `BalanceError::Tls` wraps a `tonic::transport::Error` whose entire

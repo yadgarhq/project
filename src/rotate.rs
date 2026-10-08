@@ -52,7 +52,7 @@ pub use yadgar_lifecycle::rotate::{
     CERTIFICATE_NOT_AFTER, WATCHED_FILES_UNREADABLE,
 };
 
-use crate::serve::ServeTls;
+use crate::serve::ServerTls;
 use crate::upstream::UpstreamTls;
 
 /// The `service` label on [`CERTIFICATE_NOT_AFTER`], and the name in the
@@ -63,20 +63,13 @@ use crate::upstream::UpstreamTls;
 /// selects on this string.
 const SERVICE: &str = "project";
 
-/// The listener's certificate and the private key belonging to it.
-///
-/// **Both halves, or the pair rotates half-watched.** kubelet swaps a mount
-/// atomically, so a set holding only the certificate still fires on an ordinary
-/// rotation — but a deployment that rewrites the key alone would pass
-/// unnoticed, and so would an implementation that named the certificate twice.
-impl Material for ServeTls {
-    fn files(&self) -> Vec<File<'_>> {
-        vec![
-            File::certificate(Presented::Serving, self.cert_file()),
-            File::read(self.key_file()),
-        ]
-    }
-}
+// THE LISTENER'S MATERIAL IS `yadgar-lifecycle`'s, NOT DECLARED HERE. The
+// listener type is the shared `ServerTls` (ADR-0846, B-U5), and its
+// `impl Material` ships beside it: the serving certificate, its key, and the
+// client CA bundle EXACTLY WHEN the mode verifies — the files
+// `ServerTls::builder` reads, and no others (ADR-0523). A local impl would be
+// a second answer to "which files does the listener read", which is the drift
+// lifting the type removes. `tests/assembly.rs` asserts the set member by member.
 
 /// The CA bundle `project-db`'s certificate is verified against, AND the client
 /// certificate this service presents to it.
@@ -127,8 +120,9 @@ impl Material for UpstreamTls {
 /// process actually loaded. Collecting paths and reading them when the watcher
 /// first polls would put the rest of boot inside a window where a kubelet swap
 /// quietly becomes the baseline, and the real rotation would never be noticed.
+// ADR-0523-LIBRARY-WATCHED: yadgar_lifecycle::serve_tls::ServerTls
 pub fn watch_set(
-    listener: Option<&ServeTls>,
+    listener: Option<&ServerTls>,
     upstream: Option<&UpstreamTls>,
     config: &Configuration,
 ) -> Inputs {

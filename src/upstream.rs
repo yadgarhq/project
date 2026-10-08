@@ -34,12 +34,14 @@
 //! namespace on 2026-09-12. A NetworkPolicy protects this hop on kind too.
 //! ADR-0594, as amended by ADR-0686, ranks mutual TLS and an ingress
 //! NetworkPolicy as EQUAL controls — but only on a hop where both sides hold a
-//! leaf this deployment issued AND verifies. On this hop that is not yet true:
-//! `project-db`'s `boot::server` builds `ServerTlsConfig` with `.identity(..)`
-//! only, never `.client_ca_root(..)`, so the certificate this module presents
-//! is not checked. Today the NetworkPolicy is the only BUILT control on this
-//! hop; the certificate stays load-bearing for availability, per the rest of
-//! this section, once the server side of mutual TLS lands.
+//! leaf this deployment issued AND verifies. `project-db` checks the
+//! certificate this module presents ONLY when it runs the shared
+//! `yadgar_lifecycle::serve_tls` listener (from project-db's B-U5 release,
+//! ADR-0846) AND its own `tls.clientAuth` is `optional` or `required`. Before
+//! that release, or under `off` — the value every deployment states until this hop
+//! is cut over — it is not checked, and the NetworkPolicy is the only control
+//! on this hop; the certificate stays load-bearing for availability, per the
+//! rest of this section, once that hop's `clientAuth` verifies.
 //!
 //! **A SEPARATE LEVER FROM THE ENCRYPTED TRANSPORT, deliberately.**
 //! `<PREFIX>_TLS_CLIENT_CERT_FILE` and `<PREFIX>_TLS_CLIENT_KEY_FILE` are unset

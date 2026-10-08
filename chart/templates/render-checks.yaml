@@ -193,18 +193,33 @@ first — so those two arms exist only for `--disable-openapi-validation`.
 {{- end }}
 
 {{/*
-`tls.clientAuth`, WHEN PRESENT (B-U5E, ledger 965 K-8 step 1 — the folded
-expand). The schema declares this key but no binary in this repository
-reads it yet: `serve.rs` builds server-only TLS, with no
-`client_ca_root`. So this is validated for SHAPE when a values file sets
-it, and refused outright for "optional" or "required" — the only value
-this chart's current binary can honestly carry is "off" — until B-U5's
-contract release adopts mutual TLS on the listener and lifts the refusal.
-An absent `tls.clientAuth` is UNCHECKED: it is not required yet, and
-`templates/deployment.yaml` renders nothing for it, which is what keeps
-this release render-neutral against origin/main.
+`tls.clientAuth` IS REQUIRED, WITH NO DEFAULT (B-U5, ledger 925; ADR-0845 as
+extended to the client-auth knob, ADR-0854). The binary adopts the shared
+listener (`yadgar_lifecycle::serve_tls`), reads `LISTEN_TLS_CLIENT_AUTH`
+whether or not TLS is on, and refuses the boot when it is absent — so this
+chart refuses the absent key too, and `templates/deployment.yaml` renders it
+UNCONDITIONALLY. `values.schema.json`'s `required` answers an absent key
+first on the normal path (this arm is what an operator reads for it under
+`--skip-schema-validation`); the schema leaves the value untyped, so the
+shape arms below are what refuse a bare `off`, a non-string or an unknown
+value, and each names the key and the variable.
+
+`kindIs "string"` BEFORE any comparison: YAML 1.1 reads a bare `off` as the
+boolean `false`, and `eq` on a bool against a string is a Go type error that
+names no key.
+
+The two cross-key refusals mirror the binary's own (`ClientAuthWithoutTls`,
+`NoClientCaFile`), so a values file that would crash-loop the pod is refused
+at render instead: a verifying mode needs the encrypted transport it runs
+inside, and a CA bundle to verify callers against.
 */}}
-{{- if hasKey .Values.tls "clientAuth" }}
+{{- if not (hasKey .Values.tls "clientAuth") }}
+{{- fail (join "" (list
+      "project: `tls.clientAuth` is absent. It renders LISTEN_TLS_CLIENT_AUTH, which "
+      "the binary reads whether or not TLS is on and refuses the boot without. "
+      "Write the keys you mean: `tls.clientAuth` has no default (ADR-0845) and must "
+      "be the quoted string \"off\", \"optional\" or \"required\".")) }}
+{{- end }}
 {{- if not (kindIs "string" .Values.tls.clientAuth) }}
 {{- fail (printf (join "" (list
       "project: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
@@ -214,14 +229,23 @@ this release render-neutral against origin/main.
       (kindOf .Values.tls.clientAuth) (toJson .Values.tls.clientAuth)) }}
 {{- end }}
 {{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}
-{{- fail (printf "project: `tls.clientAuth` must be \"off\", \"optional\" or \"required\" and is %s." (toJson .Values.tls.clientAuth)) }}
+{{- fail (printf "project: `tls.clientAuth` must be \"off\", \"optional\" or \"required\" and is %s. It renders LISTEN_TLS_CLIENT_AUTH, which the binary reads exactly." (toJson .Values.tls.clientAuth)) }}
 {{- end }}
 {{- if ne .Values.tls.clientAuth "off" }}
+{{- if not .Values.tls.enabled }}
 {{- fail (printf (join "" (list
-      "project: `tls.clientAuth: %s` is not enforced yet. This chart version renders "
-      "LISTEN_TLS_CLIENT_AUTH, but no binary in this repository reads it (B-U5E, "
-      "ledger 965) — the contract release that adopts mutual TLS on this listener "
-      "(B-U5) is what lifts this refusal. Only `off` is accepted until then."))
+      "project: `tls.clientAuth: %s` needs `tls.enabled: true`. A cleartext listener "
+      "cannot verify a client certificate, and the binary refuses the boot on "
+      "LISTEN_TLS_CLIENT_AUTH=%s with LISTEN_TLS_ENABLED=\"0\". Set `tls.enabled: true`, "
+      "or `tls.clientAuth: \"off\"`."))
+      .Values.tls.clientAuth .Values.tls.clientAuth) }}
+{{- end }}
+{{- if not .Values.tls.clientCaSecret }}
+{{- fail (printf (join "" (list
+      "project: `tls.clientAuth: %s` verifies callers, so it needs `tls.clientCaSecret` "
+      "— the Secret holding the CA bundle they are verified against, mounted at "
+      "LISTEN_TLS_CLIENT_CA_FILE. The binary refuses the boot without it. Name the "
+      "Secret, or set `tls.clientAuth: \"off\"`."))
       .Values.tls.clientAuth) }}
 {{- end }}
 {{- end }}

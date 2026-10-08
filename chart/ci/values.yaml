@@ -25,8 +25,14 @@
 # and the rest, so turning both switches on here renders a complete,
 # non-refusing Deployment rather than tripping the `required "..."` calls
 # those mounts carry.
+#
+# `tls.clientAuth` IS REQUIRED TOO, with no default (B-U5, ledger 925): the
+# binary reads LISTEN_TLS_CLIENT_AUTH whether or not TLS is on. `"off"`,
+# QUOTED — a bare `off` is YAML 1.1's boolean false, which the render
+# check refuses by name — is the value every deployment states until its hop is cut over.
 tls:
   enabled: true
+  clientAuth: "off"
 projectDb:
   tls:
     enabled: true
