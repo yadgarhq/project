@@ -33,7 +33,7 @@ use yadgar_project::pb::yadgar::project::v1::project_service_server::ProjectServ
 use yadgar_project::rotate::{self, Inputs, Schedule};
 use yadgar_project::serve::{self, ServeTls, LISTEN};
 use yadgar_project::service::Project;
-use yadgar_project::upstream::{UpstreamTls, PROJECT_DB};
+use yadgar_project::upstream::{self, UpstreamTls, PROJECT_DB};
 
 // `main.rs`'s own helper, reached through the binary's crate root: this module
 // is its descendant, so the private item is in scope. It stays there because
@@ -53,8 +53,9 @@ pub fn install_logging() {
         //
         // A service nobody can observe is one D67 cannot measure either.
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info") // ADR-0569-EXCEPTION(LIB): the log level is observability, not behaviour; RUST_LOG unset must still produce visible logs rather than none
+            }),
         )
         .init();
 }
@@ -95,7 +96,7 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // structural rather than tidy: the downgrade this car removes is a listener
     // that opens in cleartext because TLS configuration failed, and with one
     // construction site there is nowhere else to write it.
-    let tls = ServeTls::from_env(LISTEN).map_err(|e| e.to_string())?;
+    let tls = ServeTls::from_env(LISTEN, serve::CHART_KEY).map_err(|e| e.to_string())?;
     let server = serve::builder(tls.as_ref()).map_err(|e| e.to_string())?;
 
     // The HEADLESS Service name (D23). Resolving it yields every ready pod
@@ -114,17 +115,19 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("PROJECT_DB_PORT is not a port number: {e}"))?;
 
-    // OPT-IN, and OFF unless a deployment asks for it. Nothing configured means
-    // the cleartext dial this service has always done — no server in the estate
-    // serves TLS yet, so the cut-over is a later change that can be reverted on
-    // its own.
+    // OPT-IN AND STATED EXPLICITLY (ADR-0845). `PROJECT_DB_TLS_ENABLED` has no
+    // compiled-in default: exactly "1" dials project-db over TLS, exactly "0"
+    // is the stated-cleartext revert lever, and anything else — including
+    // absence — refuses the boot naming the variable and the chart key rather
+    // than guessing a transport.
     //
     // `.to_string()` on the way out. It dates from when `main` returned
     // `Result` and Rust printed a bare `?` here with Debug, as
     // `NoCaFile("PROJECT_DB")`. `main` prints Display now, so the conversion
     // no longer changes what the operator reads; it stays as the sentence it
     // always produced. The same reason the gateway stringifies `Limits::parse`.
-    let db_tls = UpstreamTls::from_env(PROJECT_DB).map_err(|e| e.to_string())?;
+    let db_tls =
+        UpstreamTls::from_env(PROJECT_DB, upstream::CHART_KEY).map_err(|e| e.to_string())?;
 
     // THE ROTATION SCHEDULE, READ FROM THE MOUNTED DOCUMENT (ADR-0569,
     // ADR-0570). `yadgarhq/config` renders it into the `shared` ConfigMap,

@@ -31,15 +31,23 @@ repos:
   # own test file, nothing else, so the other eleven hooks pinned here are
   # byte-identical across the bump.
   - repo: https://github.com/yadgarhq/actions
-    # THE REV MOVES FROM v1.20.1 TO v1.22.0 FOR THE TWO IDS BELOW, and the whole
-    # block comes with it because pre-commit resolves one rev per repository
-    # entry. `git diff --stat v1.20.1 v1.22.0 -- hooks/ .pre-commit-hooks.yaml`
-    # is 1901 insertions and 0 deletions, touching only the new
-    # `hooks/chart_baseline.py` and the two manifest entries that publish it — so
-    # no hook already in this block changes behaviour. A second `repo:` entry
-    # pinning the same repository at a second rev was the alternative, and it is
-    # the drift the shared manifest exists to prevent.
-    rev: v1.22.0
+    # THE REV MOVES FROM v1.22.0 TO v1.31.0 (ledger 965, unit C-SVb), and the
+    # whole block comes with it because pre-commit resolves one rev per
+    # repository entry — the same reason the v1.20.1 -> v1.22.0 note above
+    # gives. `hooks/no_compiled_in_defaults.sh` is the hook this move is FOR:
+    # the widened gate (unit C-A1) adds the `EnvFilter::new(...)` and the
+    # `lookup/env/get(...) == Some("...")` shapes this repository carried with
+    # no marker — `src/boot.rs`'s log-level fallback and the (now removed)
+    # `!= Some("1")` TLS-flag checks in `src/serve.rs`/`src/upstream.rs`. An
+    # older `rev:` here would keep running the NARROWER gate forever, silently
+    # exempting this repository from a widening every other consumer gets at
+    # their own next bump. `hooks/helm_lint.py` also lands in this range (the
+    # `helm-lint` id's `entry` moves from a bare `language: system` shell
+    # command to that script, with no change to what this chart's own lint and
+    # render must pass) — unrelated hook ids added in the same range
+    # (`hermetic-git`, `seed-front-matter`, `seed-no-ask-prompt`) are not
+    # referenced below; ADR-0577 is why that is inert rather than a gap.
+    rev: v1.31.0
     hooks:
       - id: gitleaks
       - id: prettier

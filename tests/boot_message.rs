@@ -65,6 +65,26 @@ fn a_typed_refusal_is_printed_as_its_sentence() {
     );
 }
 
+/// ADR-0845 AT THE REAL BOOT PATH, not at the library function alone. This
+/// proves the literal `boot.rs` actually passes to `ServeTls::from_env` —
+/// `serve::CHART_KEY` — reaches the operator correctly, through the compiled
+/// binary `main` runs. A typo'd chart-key literal at that call site (before
+/// `boot.rs` and `src/serve.rs` shared one `pub const` for it) would compile,
+/// pass every `src/` unit test (which construct their own `CHART_KEY` and
+/// never read `boot.rs`'s), and only show up here.
+#[test]
+fn an_absent_listen_tls_enabled_names_the_chart_key_at_the_real_boot_path() {
+    let line = refusal_without_mounts(&[]);
+    assert!(
+        line.contains("LISTEN_TLS_ENABLED"),
+        "the refusal must name the variable: {line}"
+    );
+    assert!(
+        line.contains("tls.enabled"),
+        "the refusal must name the chart key: {line}"
+    );
+}
+
 /// A bare parse, named on the way out: the port is read before the shared
 /// document, so this also needs no mount namespace.
 #[test]

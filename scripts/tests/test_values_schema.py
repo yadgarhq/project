@@ -65,11 +65,36 @@ OPEN = ("resources", "rollingUpdate")
 # Paths a template reads (`grep -rhoE '\.Values(\.[A-Za-z0-9_-]+)+' templates`)
 # that `values.yaml` does not declare. Declaring them as leaves turns their
 # parent block from an open map into a closed one with exactly this key.
-EXTRA_LEAVES = ("image.digest", "networkPolicy.scrapeFrom.namespace")
+#
+# `tls.clientAuth`/`clientCaSecret`/`clientCaSecretKey` are B-U5E's folded
+# expand (ledger 965): `templates/deployment.yaml` reads all three, and
+# `chart/values.yaml` ships none of them — left unset on purpose, so a
+# values file that does not set them renders byte-identical to
+# origin/main's (K-8). `values.schema.json` still has to declare them, or
+# an adopter setting `tls.clientAuth` would be refused by `additionalProperties:
+# false` rather than reaching the render check.
+EXTRA_LEAVES = (
+    "image.digest",
+    "networkPolicy.scrapeFrom.namespace",
+    "tls.clientAuth",
+    "tls.clientCaSecret",
+    "tls.clientCaSecretKey",
+)
 
-# This chart retains no typed leaf (unlike the `-db` twins' `database.
-# migrationLockTimeoutSeconds` or gateway's `toolsPoll.intervalSeconds`) — every
-# leaf here is `{}`, so the oracle below never special-cases one.
+# THE TWO NAMED EXCEPTIONS (ledger 965, ADR-0845): `tls.enabled` and
+# `projectDb.tls.enabled` are the only typed, required leaves this chart's
+# schema carries. Every other leaf stays untyped `{}`.
+#
+# SCHEMA-ONLY, INDEPENDENT OF `values.yaml`, and that independence is the
+# point rather than an implementation detail: this chart ships NO default
+# for either key (ADR-0845 — a chart default would be exactly the
+# compiled-in default the ADR forbids, one layer up), so neither key
+# appears in `chart/values.yaml` at all any more. The oracle cannot derive
+# either leaf by walking `values.yaml`'s own content, the way every other
+# leaf and every `EXTRA_LEAVES` entry is derived; `declare_required_no_default`
+# below injects both directly, the same way `declare_extra` injects a path
+# a template reads that `values.yaml` never declares.
+REQUIRED_NO_DEFAULT = ("tls.enabled", "projectDb.tls.enabled")
 
 
 def load_values() -> dict:
@@ -110,12 +135,37 @@ def declare_extra(schema: dict, path: str) -> None:
     cursor["properties"].setdefault(steps[-1], {})
 
 
+def declare_required_no_default(schema: dict, path: str) -> None:
+    """Declare `path` as a TYPED, REQUIRED leaf (ADR-0845), closing every
+    block along the way exactly as `declare_extra` does. Mutates `schema`.
+
+    UNLIKE `declare_extra`, this OVERWRITES the leaf with `{"type":
+    "boolean"}` rather than `setdefault`-ing `{}` — the leaf is typed, not
+    untyped — and adds the final step to its PARENT's `required` list
+    (merged with whatever is already there, so this chart's own two calls
+    for `tls.enabled` and `projectDb.tls.enabled` cannot clobber each
+    other's `required` list: they are different parents).
+    """
+    cursor = schema
+    steps = path.split(".")
+    for step in steps[:-1]:
+        cursor.setdefault("properties", {})
+        cursor.setdefault("additionalProperties", False)
+        cursor = cursor["properties"].setdefault(step, {})
+    cursor.setdefault("properties", {})
+    cursor.setdefault("additionalProperties", False)
+    cursor["properties"][steps[-1]] = {"type": "boolean"}
+    cursor["required"] = sorted({*cursor.get("required", []), steps[-1]})
+
+
 def expected_schema(values: dict) -> dict:
     """The full `properties` / `additionalProperties` shape this chart's schema owes. PURE."""
     schema = expected_node(values, "")
     schema.setdefault("properties", {})
     schema["additionalProperties"] = False
     schema["properties"].setdefault("global", {})
+    for path in REQUIRED_NO_DEFAULT:
+        declare_required_no_default(schema, path)
     for path in EXTRA_LEAVES:
         declare_extra(schema, path)
     return schema

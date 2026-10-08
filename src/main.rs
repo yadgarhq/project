@@ -301,6 +301,7 @@ mod tests {
         ];
         yadgar_project::upstream::UpstreamTls::from_lookup(
             yadgar_project::upstream::PROJECT_DB,
+            yadgar_project::upstream::CHART_KEY,
             |key| {
                 vars.iter()
                     .find(|(k, _)| k == key)

@@ -247,7 +247,7 @@ fn listener_tls(mount: &Mount) -> ServeTls {
             mount.path("tls-key.pem").display().to_string(),
         ),
     ];
-    ServeTls::from_lookup(serve::LISTEN, move |k| {
+    ServeTls::from_lookup(serve::LISTEN, serve::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -271,7 +271,7 @@ fn upstream_tls(mount: &Mount) -> UpstreamTls {
             mount.path("client-key.pem").display().to_string(),
         ),
     ];
-    UpstreamTls::from_lookup(upstream::PROJECT_DB, move |k| {
+    UpstreamTls::from_lookup(upstream::PROJECT_DB, upstream::CHART_KEY, move |k| {
         vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
     })
     .expect("a complete configuration")
@@ -379,11 +379,12 @@ fn each_configured_half_contributes_on_its_own() {
             mount.path("ca.pem").display().to_string(),
         ),
     ];
-    let server_only = UpstreamTls::from_lookup(upstream::PROJECT_DB, move |k| {
-        vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
-    })
-    .expect("a complete configuration")
-    .expect("the flag is set");
+    let server_only =
+        UpstreamTls::from_lookup(upstream::PROJECT_DB, upstream::CHART_KEY, move |k| {
+            vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+        })
+        .expect("a complete configuration")
+        .expect("the flag is set");
     assert_eq!(
         rotate::watch_set(None, Some(&server_only), &config).watched(),
         vec![mount.path("ca.pem").as_path(), config.path()],
