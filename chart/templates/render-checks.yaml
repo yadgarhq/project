@@ -198,9 +198,11 @@ extended to the client-auth knob, ADR-0854). The binary adopts the shared
 listener (`yadgar_lifecycle::serve_tls`), reads `LISTEN_TLS_CLIENT_AUTH`
 whether or not TLS is on, and refuses the boot when it is absent — so this
 chart refuses the absent key too, and `templates/deployment.yaml` renders it
-UNCONDITIONALLY. `values.schema.json`'s `required` + `enum` answers first on
-the normal path; these arms are what an operator reads under
-`--skip-schema-validation`, and each names the key and the variable.
+UNCONDITIONALLY. `values.schema.json`'s `required` answers an absent key
+first on the normal path (this arm is what an operator reads for it under
+`--skip-schema-validation`); the schema leaves the value untyped, so the
+shape arms below are what refuse a bare `off`, a non-string or an unknown
+value, and each names the key and the variable.
 
 `kindIs "string"` BEFORE any comparison: YAML 1.1 reads a bare `off` as the
 boolean `false`, and `eq` on a bool against a string is a Go type error that

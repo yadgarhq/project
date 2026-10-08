@@ -90,9 +90,10 @@ projectDb:
     # A NetworkPolicy protects this hop on kind too. ADR-0594, as amended by
     # ADR-0686, ranks mutual TLS and an ingress NetworkPolicy as EQUAL
     # controls — but only where both sides hold a leaf this deployment issued
-    # AND verifies. `project-db` checks this certificate ONLY when its own
-    # `tls.clientAuth` is `optional` or `required` (the shared
-    # `yadgar_lifecycle::serve_tls` listener, ADR-0846). Under `off` — the
+    # AND verifies. `project-db` checks this certificate ONLY when it runs
+    # the shared `yadgar_lifecycle::serve_tls` listener (from project-db's
+    # B-U5 release, ADR-0846) AND its own `tls.clientAuth` is `optional` or
+    # `required`. Before that release, or under `off` — the
     # value every deployment states until this hop is cut over — it is not
     # checked, and the NetworkPolicy is the only control on this hop; the
     # certificate stays load-bearing for availability, per the rest of this
@@ -167,8 +168,8 @@ tls:
   # string `"off"`, `"optional"` or `"required"`, rendered UNCONDITIONALLY as
   # LISTEN_TLS_CLIENT_AUTH: the binary reads it whether or not `enabled` is
   # true and refuses the boot without it, so every deployment states it.
-  # QUOTE IT: a bare `off` is YAML 1.1's boolean false, which the schema
-  # refuses. `off` asks callers for nothing. `optional` verifies a
+  # QUOTE IT: a bare `off` is YAML 1.1's boolean false, which the render
+  # check refuses by name. `off` asks callers for nothing. `optional` verifies a
   # certificate a caller presents and admits one presenting none — a staging
   # step, not a control. `required` refuses any caller without a certificate
   # the `clientCaSecret` authority issued. Both verifying modes need

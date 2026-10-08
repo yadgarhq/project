@@ -499,7 +499,7 @@ async fn a_tls_listener_refuses_a_cleartext_client() {
     let outcome = in_cleartext(port).await;
     assert!(
         outcome.is_err(),
-        "a listener told to serve TLS must not answer a cleartext client: {outcome:?}"
+        "a listener told to serve TLS must not answer a cleartext client"
     );
 }
 
@@ -519,7 +519,7 @@ async fn a_client_trusting_another_authority_is_refused() {
     let outcome = over_tls(port, &stranger.ca_pem).await;
     assert!(
         outcome.is_err(),
-        "a certificate from an authority the client does not trust must be refused: {outcome:?}"
+        "a certificate from an authority the client does not trust must be refused"
     );
 }
 
@@ -590,7 +590,7 @@ async fn an_undecodable_certificate_refuses_the_boot() {
         let outcome = serve::builder(Some(&tls));
         assert!(
             matches!(outcome, Err(ServeTlsError::Unusable { .. })),
-            "a certificate file containing {contents:?} must refuse the boot"
+            "a certificate file that decodes to no certificate must refuse the boot"
         );
     }
 }
@@ -607,7 +607,7 @@ async fn an_undecodable_private_key_refuses_the_boot() {
         let outcome = serve::builder(Some(&tls));
         assert!(
             matches!(outcome, Err(ServeTlsError::Unusable { .. })),
-            "a key file containing {contents:?} must refuse the boot"
+            "a key file that decodes to no key must refuse the boot"
         );
     }
 }
