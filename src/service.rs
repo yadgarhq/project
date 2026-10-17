@@ -1,14 +1,20 @@
 //! `ProjectService`. Business rules here; storage over the `-db` API, never
 //! directly.
 //!
-//! **TWO RPCS, AND THE OTHER FIVE ARE ABSENT FOR STATED REASONS.**
+//! **THREE RPCS, AND THE OTHER FIVE ARE ABSENT FOR STATED REASONS.**
 //! `project.proto` gives them in its own words and they are not restated here:
-//! `RegisterProject`, `RenameProject` and `ArchiveProject` are administrative
-//! and reached by port-forwarding `project-db`; `GetProject` has no caller; and
+//! `RegisterProject`, `RenameProject` and `ArchiveProject` are absent by
+//! decision (ADR-0705, kept by ADR-0936); `GetProject` has no caller; and
 //! `TouchProjects` is a call this tier MAKES rather than a verb it EXPOSES, and
 //! is staged behind `queue`. Adding any of them is a contract change first —
 //! they are on no `ProjectService` at any tag, so there is nothing to
 //! implement.
+//!
+//! **`SyncProjects` IS THE ONE WRITE VERB, AND THE CALLER CHECK IS THE POLICY.**
+//! Only the seeder may call it (ADR-0936): its verified leaf must name
+//! [`SYNC_CALLER`] and its Scope must carry [`SEEDER_PRINCIPAL`] (ADR-0942).
+//! Everything else about the sync — validation, the transaction, the
+//! mass-archive guard — belongs to the store, and this tier relays it.
 //!
 //! **THE TIER IS NOT A PROXY, AND `ListProjects` IS WHERE THAT SHOWS.**
 //! `ResolveProject` is a pass-through on the response — the two response
@@ -19,6 +25,7 @@
 //! the set is not filtered by status, and the page token is forwarded verbatim.
 
 use tonic::{Request, Response, Status};
+use yadgar_lifecycle::serve_tls::caller_common_name;
 use yadgar_telemetry::estimator::Class;
 use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
@@ -75,8 +82,10 @@ fn is_reserved_root(path: &str) -> bool {
 /// all three call sites bind it as `let _scope = scope_of(&req.scope)?;` and
 /// never read it.
 ///
-/// **NEITHER `ProjectService` REQUEST CARRIES A `Scope`, AND THAT IS THE
-/// POINT.** `ListProjects`'s caller is a BOOT LOAD holding no token, no header
+/// **NEITHER `ProjectService` READ REQUEST CARRIES A `Scope`, AND THAT IS THE
+/// POINT.** (`SyncProjects` does, because its caller is the seeder rather than
+/// the gateway, and it relays that Scope rather than this placeholder —
+/// ADR-0942.) `ListProjects`'s caller is a BOOT LOAD holding no token, no header
 /// and no request; `ResolveProject` is asked by the gateway WHILE CONSTRUCTING
 /// the estate's only `Scope`, so a `Scope`-carrying request would force a second
 /// provisional literal. There is therefore nothing here to forward, and this is
@@ -130,6 +139,10 @@ impl Project {
         }
     }
 }
+
+pub use sync::{SEEDER_PRINCIPAL, SYNC_CALLER};
+
+mod sync;
 
 /// A `-db` failure is passed through with its CODE intact but not its message.
 ///
@@ -336,6 +349,43 @@ impl ProjectService for Project {
                 encoded_bytes: Some(prost::Message::encoded_len(r) as u64),
                 class: Class::Envelope,
                 rows: 1,
+                ..Default::default()
+            },
+            status_name,
+        )
+        .await
+        .map(Response::new)
+    }
+
+    /// THE SEEDER'S ONE WRITE VERB (ADR-0936): authorise, then relay the whole
+    /// declaration to `ProjectDbService.SyncProjects` in one call. This tier
+    /// holds no registry cache, so a committed sync is what every replica's
+    /// next `ListProjects` relays — there is nothing here to refresh.
+    async fn sync_projects(
+        &self,
+        request: Request<pb::ProjectServiceSyncProjectsRequest>,
+    ) -> Result<Response<pb::ProjectServiceSyncProjectsResponse>, Status> {
+        // READ BEFORE THE REQUEST IS CONSUMED: the peer chain lives on the
+        // request's extensions, and `into_inner` drops them.
+        let caller = caller_common_name(&request);
+        let req = request.into_inner();
+        let call = Call::start(
+            "project",
+            "SyncProjects",
+            Kind::Write,
+            tel_scope(req.scope.as_ref()),
+        );
+
+        call.run(
+            async move { self.sync_as(caller.as_deref(), req).await },
+            |r| Outcome {
+                status: "OK",
+                payload: format!("{r:?}"),
+                encoded_bytes: Some(prost::Message::encoded_len(r) as u64),
+                class: Class::Envelope,
+                // Every declared row lands in exactly one count, and
+                // `archived` counts the rows the declaration omitted.
+                rows: r.inserted + r.updated + r.archived + r.reactivated + r.unchanged,
                 ..Default::default()
             },
             status_name,

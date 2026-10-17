@@ -19,22 +19,23 @@ hard limits (D4).
 `proto-contract-design.md` keeps a per-repo check that the binary has no store
 SDK in its dependency tree, for exactly this reason.
 
-## Two RPCs, and the other five are absent for stated reasons
+## Three RPCs, and the other five are absent for stated reasons
 
-`ProjectDbService` declares seven verbs. `ProjectService` declares two, and
+`ProjectDbService` declares eight verbs. `ProjectService` declares three, and
 `yadgar/project/v1/project.proto` gives the reason for each absence in its own
-words. Mirroring seven verbs one for one would be a proxy, and a proxy earns
+words. Mirroring eight verbs one for one would be a proxy, and a proxy earns
 nothing over the store it wraps.
 
-| rpc               | why it is not here                                                                                                                                                                                        |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ListProjects`    | **served** — the registry LOAD, so a caller resolves in memory rather than over the network on every request                                                                                              |
-| `ResolveProject`  | **served** — the fallback, asked when the caller has no loaded set to walk                                                                                                                                |
-| `RegisterProject` | administrative. The gateway surface meant to reach it does not exist, so it is reached by port-forwarding `project-db`                                                                                    |
-| `RenameProject`   | administrative, and it answers `UNIMPLEMENTED` in `project-db` for a second reason: an alias keeps a stored `Meta.project_id` valid but not current, and the job that retags older records does not exist |
-| `ArchiveProject`  | the same two reasons. The two return together with that job                                                                                                                                               |
-| `GetProject`      | no caller. Inventing one to justify a verb is the shape the contract refuses                                                                                                                              |
-| `TouchProjects`   | a call this tier will MAKE, never a verb it EXPOSES, and staged behind `queue`                                                                                                                            |
+| rpc               | why it is not here                                                                                                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ListProjects`    | **served** — the registry LOAD, so a caller resolves in memory rather than over the network on every request                                                                                           |
+| `ResolveProject`  | **served** — the fallback, asked when the caller has no loaded set to walk                                                                                                                             |
+| `SyncProjects`    | **served** — the seeder's one write verb (ADR-0936): the organisation's whole declaration, relayed to the store in one call. See [The seeder's sync](#the-seeders-sync)                                |
+| `RegisterProject` | absent by decision: ADR-0705 gives this tier no per-row Register, Rename or Archive verb, and ADR-0936 keeps that refusal. Organisation rows arrive through `SyncProjects`                             |
+| `RenameProject`   | absent by the same decision, and it answers `UNIMPLEMENTED` in `project-db` too: an alias keeps a stored `Meta.project_id` valid but not current, and the job that retags older records does not exist |
+| `ArchiveProject`  | the same two reasons. A sync's archive is a status flip inside `SyncProjects`, not this verb                                                                                                           |
+| `GetProject`      | no caller. Inventing one to justify a verb is the shape the contract refuses                                                                                                                           |
+| `TouchProjects`   | a call this tier will MAKE, never a verb it EXPOSES, and staged behind `queue`                                                                                                                         |
 
 **Adding any of the five is a contract change first.** They are on no
 `ProjectService` at any tag, so there is nothing here to implement.
@@ -73,13 +74,47 @@ makes resolving upward acceptable instead of refusing, and D52 chose the upward
 resolution on the condition that the soft failure is made visible. It is
 forwarded, never swallowed.
 
+## The seeder's sync
+
+`SyncProjects` is the one write verb on this tier (ADR-0936, amending ADR-0705).
+The D35 seeder sends the organisation's whole declared list, and this tier
+relays it to `ProjectDbService.SyncProjects`, which applies it in one
+transaction. The gateway never exposes the verb on any route.
+
+**The caller check is this tier's policy, and it runs before the relay.** A
+call is admitted only when both checks pass, and neither is trusted alone
+(ADR-0942):
+
+- The verified client leaf's common name is exactly `seeder-caller`. mTLS alone
+  proves "one of ours", because every module's leaf verifies against the same
+  authority. The name is read with `yadgar_lifecycle::serve_tls::caller_common_name`,
+  the same function `project-db` uses for its own `project-caller` check.
+- `scope.user_id` is exactly `yadgar:system:seeder`, the seeder's fixed system
+  principal.
+
+Any other caller is refused `PERMISSION_DENIED`, the gateway's leaf included,
+and the store is never called.
+
+**The relay is field for field.** The seeder builds this Scope itself, because
+no gateway sits on this path (ADR-0942). Its `request_id` is relayed unchanged,
+so D67's records for one sync join across both hops. The mass-archive flag
+(ADR-0939) is relayed too; the store applies that guard.
+
+**Store refusals keep their code and their message**, unlike the two read
+verbs. The caller is an internal Job, and its log is the operator's only view of
+which declared path the store refused.
+
+**There is no cache to refresh.** This tier holds no registry state, so every
+replica's next `ListProjects` relays the committed set. `tests/sync.rs` pins it
+with two replicas.
+
 ## The `Scope` this tier sends attests nothing, and that is open
 
 `project-db` refuses a store call carrying no `yadgar.common.v1.Scope`, with the
 message _"scope is required and is attested by the gateway"_. **That sentence is
 false for this caller**, and `src/service.rs` says so where the value is made.
 
-Neither `ProjectService` request carries a `Scope`, and neither can:
+Neither `ProjectService` READ request carries a `Scope`, and neither can:
 `ListProjects`'s caller is a boot load holding no token, no header and no
 request, and `ResolveProject` is asked by the gateway WHILE CONSTRUCTING the
 estate's only `Scope`. So there is nothing to forward. The store's check is
