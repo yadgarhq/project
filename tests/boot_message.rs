@@ -276,3 +276,26 @@ fn a_bind_failure_names_the_listen_address() {
         "the refusal must carry the OS reason, not just tonic's own `transport error`: {line}"
     );
 }
+
+/// ADR-0925 Q-C1: `PROJECT_DB_REQUEST_TIMEOUT_SECONDS` has no compiled-in default, so
+/// each of these four values refuses the boot, naming the variable AND the
+/// chart key that renders it. Read before `shared.yaml`, so no mount namespace.
+#[test]
+fn a_missing_or_out_of_range_request_timeout_names_the_variable_and_the_chart_key() {
+    for bad in [None, Some("0"), Some("13"), Some("60")] {
+        let mut vars = cleartext_env();
+        vars.retain(|(k, _)| *k != "PROJECT_DB_REQUEST_TIMEOUT_SECONDS");
+        if let Some(value) = bad {
+            vars.push(("PROJECT_DB_REQUEST_TIMEOUT_SECONDS", value));
+        }
+        let line = refusal_without_mounts(&vars);
+        assert!(
+            line.contains("PROJECT_DB_REQUEST_TIMEOUT_SECONDS"),
+            "{bad:?}: the refusal must name the variable: {line}"
+        );
+        assert!(
+            line.contains("projectDb.requestTimeoutSeconds"),
+            "{bad:?}: the refusal must name the chart key: {line}"
+        );
+    }
+}

@@ -102,6 +102,16 @@ REQUIRED_UNTYPED_NO_DEFAULT = ("tls.clientAuth",)
 # a template reads that `values.yaml` never declares.
 REQUIRED_NO_DEFAULT = ("tls.enabled", "projectDb.tls.enabled")
 
+# THE ONE TYPED, BOUNDED, REQUIRED LEAF THAT DOES SHIP A DEFAULT (ADR-0925 Q-C1,
+# ledger 1490): `projectDb.requestTimeoutSeconds` is `type: integer` with a
+# `minimum` and `maximum`, and its parent lists it under `required`. Unlike the
+# REQUIRED_NO_DEFAULT pair it IS in `chart/values.yaml` (an explicit 30, never
+# compiled in), so the oracle derives the leaf from `values.yaml` and then
+# overwrites it with the typed node. The bounds are `yadgar_dial`'s
+# `min_request_timeout()` / `max_request_timeout()`;
+# `tests/chart_request_timeout.rs` holds them to the pinned crate.
+REQUIRED_BOUNDED_INTEGER = {"projectDb.requestTimeoutSeconds": (14, 59)}
+
 
 def load_values() -> dict:
     return yaml.safe_load(VALUES_PATH.read_text()) or {}
@@ -175,6 +185,17 @@ def declare_required_untyped(schema: dict, path: str) -> None:
     cursor["properties"][steps[-1]] = {}
 
 
+def declare_bounded_integer(schema: dict, path: str, minimum: int, maximum: int) -> None:
+    """Overwrite the leaf at `path` with its bounded integer node and list it
+    under its parent's `required`. Mutates `schema`."""
+    cursor = schema
+    steps = path.split(".")
+    for step in steps[:-1]:
+        cursor = cursor["properties"][step]
+    cursor["properties"][steps[-1]] = {"type": "integer", "minimum": minimum, "maximum": maximum}
+    cursor["required"] = sorted({*cursor.get("required", []), steps[-1]})
+
+
 def expected_schema(values: dict) -> dict:
     """The full `properties` / `additionalProperties` shape this chart's schema owes. PURE."""
     schema = expected_node(values, "")
@@ -187,6 +208,8 @@ def expected_schema(values: dict) -> dict:
         declare_required_untyped(schema, path)
     for path in EXTRA_LEAVES:
         declare_extra(schema, path)
+    for path, (minimum, maximum) in REQUIRED_BOUNDED_INTEGER.items():
+        declare_bounded_integer(schema, path, minimum, maximum)
     return schema
 
 
@@ -396,3 +419,18 @@ def test_the_default_render_object_count_is_unchanged():
     result = render(CHART)
     assert result.returncode == 0, result.stderr
     assert len(objects(result.stdout)) == 4, objects(result.stdout)
+
+
+def test_the_request_timeout_is_a_bounded_required_integer():
+    schema = load_schema()
+    for path, (minimum, maximum) in REQUIRED_BOUNDED_INTEGER.items():
+        *parents, leaf_key = path.split(".")
+        cursor = schema
+        for step in parents:
+            cursor = cursor["properties"][step]
+        assert cursor["properties"][leaf_key] == {
+            "type": "integer",
+            "minimum": minimum,
+            "maximum": maximum,
+        }, path
+        assert leaf_key in cursor.get("required", []), path

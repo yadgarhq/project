@@ -17,6 +17,11 @@
       "properties": {
         "host": {},
         "port": {},
+        "requestTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 14,
+          "maximum": 59
+        },
         "tls": {
           "properties": {
             "enabled": { "type": "boolean" },
@@ -31,6 +36,7 @@
           "additionalProperties": false
         }
       },
+      "required": ["requestTimeoutSeconds"],
       "additionalProperties": false
     },
     "tls": {

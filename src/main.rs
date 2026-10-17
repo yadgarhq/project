@@ -169,10 +169,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         db_host,
         db_port,
         db_tls,
+        request_timeout,
         watch_inputs,
         schedule,
     } = boot::prepare()?;
-    let channel = upstream::connect(&db_host, db_port, db_tls.as_ref())
+    let channel = upstream::connect(&db_host, db_port, db_tls.as_ref(), request_timeout)
         .await
         // `refusal` rather than `to_string()` (ledger 733, ledger 740): see its
         // own doc comment for why this is the one site in this file that takes
@@ -184,6 +185,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         reresolve_secs = yadgar_dial::reresolve_interval().as_secs(),
         tls = db_tls.is_some(),
+        request_timeout_secs = request_timeout.as_secs(),
         "connected to project-db"
     );
 
@@ -269,9 +271,14 @@ mod tests {
         let ca = MintedCa::new();
         let tls = upstream_tls(ca.path(), "not a server name");
 
-        let error = yadgar_project::upstream::connect("project-db", 50051, Some(&tls))
-            .await
-            .expect_err("a domain rustls cannot parse must refuse before any dial");
+        let error = yadgar_project::upstream::connect(
+            "project-db",
+            50051,
+            Some(&tls),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect_err("a domain rustls cannot parse must refuse before any dial");
 
         assert!(
             refusal(&error).contains("invalid dns name"),

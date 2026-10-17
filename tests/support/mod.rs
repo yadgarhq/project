@@ -81,6 +81,7 @@ pub fn cleartext_env() -> Vec<(&'static str, &'static str)> {
         ("LISTEN_TLS_ENABLED", "0"),
         ("LISTEN_TLS_CLIENT_AUTH", "off"),
         ("PROJECT_DB_TLS_ENABLED", "0"),
+        ("PROJECT_DB_REQUEST_TIMEOUT_SECONDS", "30"),
     ]
 }
 

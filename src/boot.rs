@@ -76,6 +76,10 @@ pub struct Prepared {
     pub db_host: String,
     pub db_port: u16,
     pub db_tls: Option<UpstreamTls>,
+    /// How long one request to project-db may wait for a peer that never
+    /// replies (ADR-0925 Q-C1). Read here, with every other input, so a bad
+    /// value refuses before the dial.
+    pub request_timeout: std::time::Duration,
     pub watch_inputs: rotate::Inputs,
     pub schedule: rotate::Schedule,
 }
@@ -135,6 +139,11 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     let db_tls =
         UpstreamTls::from_env(PROJECT_DB, upstream::CHART_KEY).map_err(|e| e.to_string())?;
 
+    // NO COMPILED-IN DEFAULT (ADR-0569, ADR-0925 Q-C1). An unset, zero or
+    // out-of-range value refuses the boot naming the variable and
+    // `projectDb.requestTimeoutSeconds`.
+    let request_timeout = upstream::request_timeout_from_env().map_err(|e| e.to_string())?;
+
     // THE ROTATION SCHEDULE, READ FROM THE MOUNTED DOCUMENT (ADR-0569,
     // ADR-0570). `yadgarhq/config` renders it into the `shared` ConfigMap,
     // mounted at `/etc/yadgar/config/shared/shared.yaml`. There is no
@@ -183,6 +192,7 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
         db_host,
         db_port,
         db_tls,
+        request_timeout,
         watch_inputs,
         schedule,
     })
