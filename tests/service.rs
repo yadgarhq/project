@@ -120,7 +120,7 @@ fn answer<T: Clone>(canned: &Option<Canned<T>>, rpc: &str) -> Result<Response<T>
     }
 }
 
-/// The five verbs this tier never calls answer `UNIMPLEMENTED` here, which is
+/// The verbs these cases never reach answer `UNIMPLEMENTED` here, which is
 /// also what `project-db` answers for two of them. A handler that grew one of
 /// them would fail rather than reach a stub that pretends.
 #[tonic::async_trait]
@@ -181,6 +181,16 @@ impl ProjectDbService for MockDb {
     ) -> Result<Response<pb::ArchiveProjectResponse>, Status> {
         Err(Status::unimplemented(
             "the tier must never call ArchiveProject",
+        ))
+    }
+    // `tests/sync.rs` owns the sync relay and serves its own store; no handler
+    // these cases call reaches this verb.
+    async fn sync_projects(
+        &self,
+        _request: Request<pb::SyncProjectsRequest>,
+    ) -> Result<Response<pb::SyncProjectsResponse>, Status> {
+        Err(Status::unimplemented(
+            "no read handler may call SyncProjects",
         ))
     }
 }
