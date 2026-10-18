@@ -97,6 +97,22 @@ type Canned<T> = Result<T, (Code, &'static str)>;
 struct Recorded {
     list: Vec<pb::ListProjectsRequest>,
     resolve: Vec<pb::ResolveProjectRequest>,
+    /// The `x-yadgar-request-id` each `ListProjects` arrived with, read through
+    /// `to_str()` as `project-db` reads it. `None` is no header at all.
+    list_request_ids: Vec<Option<String>>,
+    /// The same, for each `ResolveProject`.
+    resolve_request_ids: Vec<Option<String>>,
+}
+
+/// The header a store call arrived with, read the way `project-db` reads it:
+/// `to_str()`, so a value that is not visible ASCII arrives as `None` here
+/// exactly as it would be unreadable there.
+fn request_id_header<T>(request: &Request<T>) -> Option<String> {
+    request
+        .metadata()
+        .get("x-yadgar-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 /// One scripted outcome per RPC. No queue: no handler in this service calls any
@@ -138,7 +154,11 @@ impl ProjectDbService for MockDb {
         &self,
         request: Request<pb::ResolveProjectRequest>,
     ) -> Result<Response<pb::ResolveProjectResponse>, Status> {
-        self.seen.lock().unwrap().resolve.push(request.into_inner());
+        let id = request_id_header(&request);
+        let mut seen = self.seen.lock().unwrap();
+        seen.resolve_request_ids.push(id);
+        seen.resolve.push(request.into_inner());
+        drop(seen);
         answer(&self.resolve, "ResolveProject")
     }
 
@@ -153,7 +173,11 @@ impl ProjectDbService for MockDb {
         &self,
         request: Request<pb::ListProjectsRequest>,
     ) -> Result<Response<pb::ListProjectsResponse>, Status> {
-        self.seen.lock().unwrap().list.push(request.into_inner());
+        let id = request_id_header(&request);
+        let mut seen = self.seen.lock().unwrap();
+        seen.list_request_ids.push(id);
+        seen.list.push(request.into_inner());
+        drop(seen);
         answer(&self.list, "ListProjects")
     }
 
@@ -313,6 +337,43 @@ async fn the_reserved_segment_filter_folds_ascii_case() {
     // refusing it would delete that class. Only the bare segment goes.
     let paths: Vec<&str> = got.paths.iter().map(|p| p.path.as_str()).collect();
     assert_eq!(paths, vec!["locals", "local/home"]);
+}
+
+/// THE SAME GUARD, ON THE ALIASES (ledger 764). `project-db` closes both arms
+/// with one line — `read.rs` drops `local` from the ancestor chain it binds
+/// against live paths AND aliases — so an alias at the bare segment is as much
+/// the hole `ProjectServiceListProjectsResponse` names as a live path there. A
+/// caller walking this set performs a second walk, and an alias at `local`
+/// would be the nearest ancestor of every private path.
+///
+/// No write path mints aliases today (`RenameProject` is held back), but a
+/// code-only guard does not delete a row an earlier build or a hand-written
+/// statement accepted, so the row can still arrive here.
+///
+/// **THE MUTATION THAT REDS IT:** copy `project.aliases` through unfiltered.
+#[tokio::test]
+async fn an_alias_at_the_bare_reserved_segment_is_dropped_from_the_set() {
+    let mut row = a_stored_project("acme/kept-by-the-store", pb::ProjectStatus::Active);
+    row.aliases = vec![
+        "local".into(),
+        "LOCAL".into(),
+        "local/home".into(),
+        "locals".into(),
+    ];
+    let (got, _) = list_returning(pb::ListProjectsResponse {
+        projects: vec![row],
+        next_page_token: String::new(),
+    })
+    .await;
+
+    assert_eq!(got.paths.len(), 1, "the row stays; only its alias goes");
+    // `local/home` is the private class the segment is reserved to carry and
+    // `locals` is a different organisation. Only the bare segment, in any ASCII
+    // case, is dropped — the same precision the path filter has.
+    assert_eq!(
+        got.paths[0].aliases,
+        vec!["local/home".to_string(), "locals".to_string()]
+    );
 }
 
 /// `RegisteredPath`: "THE SET IS NOT FILTERED BY STATUS, AND MUST NOT BE." A
@@ -484,6 +545,13 @@ async fn an_inexact_resolution_is_not_an_error() {
 /// It is asserted so that whichever of the plan's routes is ruled — the tier
 /// mints one, the contract grows one, or the store stops demanding one — the
 /// change trips a test rather than passing silently.
+///
+/// **AND IT CANNOT TRIP ON ROUTE (c) BY ITSELF (ledger 762).** The store here
+/// is a mock, so its premise — "the store refuses an absent one" — is pinned in
+/// `project-db` instead, by `an_absent_scope_is_refused` (`tests/resolve.rs`)
+/// and `list_refuses_an_absent_scope` (`tests/list.rs`). The PR that flips those
+/// two is route (c), and the same train MUST delete this test and
+/// `service.rs::unattested_placeholder_scope`.
 #[tokio::test]
 async fn both_store_calls_carry_a_scope_because_the_store_refuses_an_absent_one() {
     let (svc, seen) = wire(MockDb {
@@ -507,11 +575,13 @@ async fn both_store_calls_carry_a_scope_because_the_store_refuses_an_absent_one(
     let seen = seen.lock().unwrap();
     assert!(
         seen.list[0].scope.is_some(),
-        "an absent scope is refused by project-db before it reads a row"
+        "an absent scope is refused by project-db before it reads a row — pinned \
+         there by list_refuses_an_absent_scope (tests/list.rs, ledger 762)"
     );
     assert!(
         seen.resolve[0].scope.is_some(),
-        "an absent scope is refused by project-db before it reads a row"
+        "an absent scope is refused by project-db before it reads a row — pinned \
+         there by an_absent_scope_is_refused (tests/resolve.rs, ledger 762)"
     );
 }
 
@@ -608,4 +678,184 @@ async fn a_list_failure_passes_through_with_its_code_intact() {
         .expect_err("the store failed, so the call must");
     assert_eq!(status.code(), Code::InvalidArgument);
     assert!(!status.message().contains("project_0007"));
+}
+
+// ---------------------------------------------------------------------------
+// D67's request id: read from the header, because no read request carries a
+// Scope (ledger 1254).
+// ---------------------------------------------------------------------------
+
+/// The id the GATEWAY mints and stamps on every upstream call
+/// (`gateway/src/upstream/request_id.rs`, ledger 1248). A UUIDv7 nothing in
+/// this crate produces, so a record carrying it got it from the header.
+const GATEWAY_REQUEST_ID: &str = "01a0fdd8-2b87-704e-b0b6-77e1c0ffee42";
+
+/// Captures every `CallRecord` line `yadgar_telemetry::record::emit` writes,
+/// for as long as the guard `record::set_sink` hands back lives.
+#[derive(Clone, Default)]
+struct RecordCapture(Arc<Mutex<Vec<String>>>);
+
+impl yadgar_telemetry::record::Sink for RecordCapture {
+    fn write_record(&self, line: &str) -> std::io::Result<()> {
+        self.0.lock().expect("the capture").push(line.to_string());
+        Ok(())
+    }
+}
+
+/// `message` with `x-yadgar-request-id: id`, as the gateway sends it.
+fn with_request_id<T>(message: T, id: &str) -> Request<T> {
+    let mut req = Request::new(message);
+    req.metadata_mut()
+        .insert("x-yadgar-request-id", id.parse().expect("an ASCII id"));
+    req
+}
+
+/// The one `CallRecord` line `run` emitted.
+///
+/// The sink is THREAD-scoped, and `#[tokio::test]` runs the handler on the
+/// test's own thread, so the record lands here rather than on stdout.
+async fn the_call_record<F: std::future::Future>(run: F) -> String {
+    let records = RecordCapture::default();
+    {
+        let _sink = yadgar_telemetry::record::set_sink(Arc::new(records.clone()));
+        let _ = run.await;
+    }
+    let lines = records.0.lock().expect("the capture").clone();
+    assert_eq!(lines.len(), 1, "exactly one CallRecord: {lines:?}");
+    lines[0].clone()
+}
+
+/// Whether a `CallRecord` line carries exactly `id` as its `request_id`.
+fn carries(record: &str, id: &str) -> bool {
+    record.contains(&format!(r#""request_id":"{id}""#))
+}
+
+async fn a_store_answering_both_reads() -> (Project, Arc<Mutex<Recorded>>) {
+    wire(MockDb {
+        list: Some(Ok(pb::ListProjectsResponse::default())),
+        resolve: Some(Ok(pb::ResolveProjectResponse::default())),
+        ..Default::default()
+    })
+    .await
+}
+
+/// **THE ID THE GATEWAY SENT IS THE ONE THIS HOP RECORDS, AND THE ONE THE STORE
+/// RECEIVES.** `ListProjects` carries no `Scope`, so the header is the only
+/// place the id can come from; a handler reading the `Scope` alone records the
+/// placeholder's `""` and the call joins to nothing.
+///
+/// **THE MUTATION THAT REDS IT:** drop the header read, or the forward.
+#[tokio::test]
+async fn list_records_and_forwards_the_callers_request_id() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+
+    let record = the_call_record(svc.list_projects(with_request_id(
+        pb::ProjectServiceListProjectsRequest::default(),
+        GATEWAY_REQUEST_ID,
+    )))
+    .await;
+
+    assert!(carries(&record, GATEWAY_REQUEST_ID), "{record}");
+    assert_eq!(
+        seen.lock().unwrap().list_request_ids,
+        vec![Some(GATEWAY_REQUEST_ID.to_string())],
+        "project-db joins on the id only if this hop forwards it"
+    );
+}
+
+/// The same, for `ResolveProject` — the call the gateway makes on the request
+/// path, so the one whose join an operator needs first.
+#[tokio::test]
+async fn resolve_records_and_forwards_the_callers_request_id() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+
+    let record = the_call_record(svc.resolve_project(with_request_id(
+        pb::ProjectServiceResolveProjectRequest {
+            candidate_path: CALLER_CANDIDATE.into(),
+        },
+        GATEWAY_REQUEST_ID,
+    )))
+    .await;
+
+    assert!(carries(&record, GATEWAY_REQUEST_ID), "{record}");
+    assert_eq!(
+        seen.lock().unwrap().resolve_request_ids,
+        vec![Some(GATEWAY_REQUEST_ID.to_string())]
+    );
+}
+
+/// **AN OVER-LONG ID IS CAPPED ONCE, HERE, AND THE CAPPED VALUE IS BOTH WHAT
+/// THIS HOP RECORDS AND WHAT IT FORWARDS** — the bound and marker `iam` and
+/// `iam-db` apply, so every hop cuts one over-long id identically and the
+/// records still join. A header is bounded only by the transport; uncapped, a
+/// caller that is not the gateway puts tens of kilobytes on every record.
+#[tokio::test]
+async fn an_over_long_request_id_is_capped_on_the_record_and_on_the_wire() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+    let long = "z".repeat(1000);
+    let cut = format!("{}...", "z".repeat(256));
+
+    let record = the_call_record(svc.resolve_project(with_request_id(
+        pb::ProjectServiceResolveProjectRequest {
+            candidate_path: CALLER_CANDIDATE.into(),
+        },
+        &long,
+    )))
+    .await;
+
+    assert!(carries(&record, &cut), "cut to 256 plus `...`: {record}");
+    assert_eq!(seen.lock().unwrap().resolve_request_ids, vec![Some(cut)]);
+}
+
+/// No header, no id: the record carries `""` and the store receives NO header
+/// rather than an empty one. Never a refusal — telemetry does not fail a call
+/// (D25), and `ListProjects`'s boot-load caller may send no header at all.
+#[tokio::test]
+async fn an_absent_request_id_records_empty_and_forwards_nothing() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+
+    let list = the_call_record(svc.list_projects(Request::new(
+        pb::ProjectServiceListProjectsRequest::default(),
+    )))
+    .await;
+    let resolve = the_call_record(svc.resolve_project(Request::new(
+        pb::ProjectServiceResolveProjectRequest {
+            candidate_path: CALLER_CANDIDATE.into(),
+        },
+    )))
+    .await;
+
+    assert!(carries(&list, ""), "{list}");
+    assert!(carries(&resolve, ""), "{resolve}");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.list_request_ids, vec![None]);
+    assert_eq!(seen.resolve_request_ids, vec![None]);
+}
+
+/// **THE PLACEHOLDER STAYS EMPTY WHEN AN ID ARRIVES.** The header reaches the
+/// record and the wire as metadata; it is never copied into the `Scope` this
+/// tier sends, because that `Scope` attests nothing (ADR-0511) and a value in it
+/// would read as one the gateway attested (ledger 762).
+#[tokio::test]
+async fn the_request_id_never_enters_the_placeholder_scope() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+
+    svc.list_projects(with_request_id(
+        pb::ProjectServiceListProjectsRequest::default(),
+        GATEWAY_REQUEST_ID,
+    ))
+    .await
+    .expect("the store answered");
+    svc.resolve_project(with_request_id(
+        pb::ProjectServiceResolveProjectRequest {
+            candidate_path: CALLER_CANDIDATE.into(),
+        },
+        GATEWAY_REQUEST_ID,
+    ))
+    .await
+    .expect("the store answered");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.list[0].scope.as_ref().unwrap().request_id, "");
+    assert_eq!(seen.resolve[0].scope.as_ref().unwrap().request_id, "");
 }
