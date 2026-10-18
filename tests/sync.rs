@@ -673,3 +673,37 @@ async fn a_direct_handler_call_has_no_peer_chain_and_is_refused() {
     assert_eq!(err.code(), Code::PermissionDenied);
     assert!(store.syncs().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// ListProjects' caller check, over the wire (ledger 1643).
+// ---------------------------------------------------------------------------
+
+/// The load is the gateway's alone: every OTHER leaf the authority issues —
+/// the seeder's included — is refused `PERMISSION_DENIED` through the real
+/// listener, and the gateway's own leaf is admitted. This is the half the
+/// `list_as` cases in `tests/service.rs` cannot see: that the handler reads the
+/// name off the certificate the listener verified, before `into_inner()`.
+#[tokio::test]
+async fn only_the_gateway_s_leaf_may_load_the_registry() {
+    let store = FakeStore::answering(Ok(store_counts()));
+    store.held.lock().unwrap().paths = vec!["tapir".into()];
+    let pki = Pki::new();
+    let (port, _files) = serve_project(&pki, project_over(&store).await).await;
+
+    for name in [SYNC_CALLER, "iam-caller", "task-caller", "project-caller"] {
+        let err = client_as(port, &pki, pki.client(name))
+            .await
+            .list_projects(pb::ProjectServiceListProjectsRequest::default())
+            .await
+            .expect_err(name);
+        assert_eq!(err.code(), Code::PermissionDenied, "{name:?}: {err:?}");
+    }
+
+    let listed = client_as(port, &pki, pki.client("gateway-caller"))
+        .await
+        .list_projects(pb::ProjectServiceListProjectsRequest::default())
+        .await
+        .expect("the gateway's leaf is admitted")
+        .into_inner();
+    assert_eq!(listed.paths.len(), 1);
+}
