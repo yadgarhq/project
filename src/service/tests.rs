@@ -72,3 +72,34 @@ fn a_scope_request_id_wins_over_the_header() {
     );
     assert_eq!(tel_scope_joined(None, String::new()).request_id, "");
 }
+
+/// LEDGER 1643. The list's telemetry payload carries no owner id: the load now
+/// relays every private row's owner, and `Outcome.payload` is a rendering of
+/// what was returned. The payload keeps the paths, which is what the word
+/// count measures; the row count is `Outcome.rows`.
+///
+/// **THE MUTATION THAT REDS IT:** render the whole response with `{r:?}`.
+#[test]
+fn the_list_payload_carries_no_owner_id() {
+    let owner = "yadgar:user:0192f3c1-an-owner-telemetry-must-not-carry";
+    let response = pb::ProjectServiceListProjectsResponse {
+        paths: vec![
+            pb::RegisteredPath {
+                path: "local/the-owner/notes".into(),
+                owner_user_id: owner.into(),
+                ..Default::default()
+            },
+            pb::RegisteredPath {
+                path: "acme/widgets".into(),
+                ..Default::default()
+            },
+        ],
+        next_page_token: String::new(),
+    };
+
+    let payload = list::list_payload(&response);
+    assert!(!payload.contains(owner), "{payload}");
+    assert!(!payload.contains("0192f3c1"), "{payload}");
+    assert!(payload.contains("local/the-owner/notes"), "{payload}");
+    assert!(payload.contains("acme/widgets"), "{payload}");
+}

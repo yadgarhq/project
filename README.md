@@ -28,7 +28,7 @@ nothing over the store it wraps.
 
 | rpc               | why it is not here                                                                                                                                                                                     |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ListProjects`    | **served** — the registry LOAD, so a caller resolves in memory rather than over the network on every request                                                                                           |
+| `ListProjects`    | **served** — the registry LOAD, so a caller resolves in memory rather than over the network on every request. The gateway's leaf only. See [The load's caller](#the-loads-caller)                      |
 | `ResolveProject`  | **served** — the fallback, asked when the caller has no loaded set to walk                                                                                                                             |
 | `SyncProjects`    | **served** — the seeder's one write verb (ADR-0936): the organisation's whole declaration, relayed to the store in one call. See [The seeder's sync](#the-seeders-sync)                                |
 | `RegisterProject` | absent by decision: ADR-0705 gives this tier no per-row Register, Rename or Archive verb, and ADR-0936 keeps that refusal. Organisation rows arrive through `SyncProjects`                             |
@@ -68,6 +68,25 @@ states on the response:
   wrong one, and the value is bound into rows that no later pass can merge. The
   token is the store's keyset cursor over ITS last row, so it is never
   recomputed from the rows that survived the reserved-segment filter.
+
+Since proto v1.20.0 each row also carries `owner_user_id`: the store's
+`Meta.owner_user_id`, relayed unchanged. It is the registrant of a private
+(`local/…`) row and `""` on every org row. A row with no `Meta` reports `""`.
+The tier never derives it from the path or from `created_by`. The gateway's
+membership check (ADR-0947, `plans/project-membership.md`) reads it.
+
+## The load's caller
+
+The load carries the owner of every private row, so `ListProjects` admits one
+caller: the verified client leaf must name exactly `gateway-caller`, the common
+name `platform` writes on `gateway-client-tls`. The gateway is the load's only
+production caller (ledger 1643). Any other leaf, and a call with no client
+certificate, is refused `PERMISSION_DENIED` before the store is asked. The name
+is a constant (`LIST_CALLER`), as `seeder-caller` is for the sync, not a chart
+value. `ResolveProject` checks no caller.
+
+The call record's payload for the list is the paths alone, so no owner id
+enters it. The row count is the record's `rows_returned`.
 
 `exact: false` is neither an error nor a detail: it is the safety property that
 makes resolving upward acceptable instead of refusing, and D52 chose the upward

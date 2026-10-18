@@ -16,6 +16,10 @@
 //! Everything else about the sync — validation, the transaction, the
 //! mass-archive guard — belongs to the store, and this tier relays it.
 //!
+//! **`ListProjects` CHECKS ITS CALLER TOO (ledger 1643).** The load carries the
+//! owner of every private row, so only the gateway's leaf may call it — see
+//! [`LIST_CALLER`]. `ResolveProject` checks no caller.
+//!
 //! **THE TIER IS NOT A PROXY, AND `ListProjects` IS WHERE THAT SHOWS.**
 //! `ResolveProject` is a pass-through on the response — the two response
 //! messages are field-for-field identical and are separate types only because
@@ -23,6 +27,7 @@
 //! the tier owns is the REQUEST it sends, and, on the list, three obligations
 //! the contract states on the response: the bare reserved segment is dropped,
 //! the set is not filtered by status, and the page token is forwarded verbatim.
+//! The list also relays each private row's owner from `Meta.owner_user_id`.
 
 use tonic::{Request, Response, Status};
 use yadgar_lifecycle::serve_tls::caller_common_name;
@@ -171,8 +176,10 @@ impl Project {
     }
 }
 
+pub use list::LIST_CALLER;
 pub use sync::{SEEDER_PRINCIPAL, SYNC_CALLER};
 
+mod list;
 mod request_id;
 mod sync;
 
@@ -233,109 +240,15 @@ fn passthrough(status: Status, op: &str) -> Status {
 impl ProjectService for Project {
     /// THE REGISTRY LOAD. A caller answers "what does this path resolve to" in
     /// memory rather than over the network on every request, and this is where
-    /// it gets the set to answer from.
+    /// it gets the set to answer from. See [`Project::list_as`].
     async fn list_projects(
         &self,
         request: Request<pb::ProjectServiceListProjectsRequest>,
     ) -> Result<Response<pb::ProjectServiceListProjectsResponse>, Status> {
-        let request_id = request_id_of(&request);
-        let req = request.into_inner();
-        let scope = unattested_placeholder_scope();
-        // Started BEFORE the work, so the duration covers the handler.
-        let call = Call::start(
-            "project",
-            "ListProjects",
-            Kind::Read,
-            tel_scope_joined(scope.as_ref(), request_id.clone()),
-        );
-
-        call.run(
-            async move {
-                let listed = self
-                    .db
-                    .clone()
-                    .list_projects(carrying(
-                        pb::ListProjectsRequest {
-                            scope,
-                            // THE WHOLE REGISTRY, NEVER A SLICE. `under_path` is the
-                            // only field that could narrow it, and the caller of
-                            // this rpc is loading the set it will resolve every
-                            // future candidate against — a subtree would answer some
-                            // of them wrongly and none of them detectably.
-                            under_path: String::new(),
-                            // NOT FILTERED BY STATUS, AND IT MUST NOT BE.
-                            // `RegisteredPath`'s own comment: the store's resolution
-                            // walks live paths and aliases without consulting status
-                            // and reports the status it found, so a caller that
-                            // dropped archived rows from its own walk would resolve
-                            // a candidate to a different ancestor than
-                            // `ResolveProject` resolves it to — two answers for one
-                            // path, differing only in which route the caller took.
-                            status: None,
-                            page_size: req.page_size,
-                            page_token: req.page_token,
-                        },
-                        &request_id,
-                    ))
-                    .await
-                    .map_err(|e| passthrough(e, "list"))?
-                    .into_inner();
-
-                let paths = listed
-                    .projects
-                    .into_iter()
-                    // The bare reserved segment, dropped as a path here and as
-                    // an alias below. See [`is_reserved_root`].
-                    .filter(|project| !is_reserved_root(&project.path))
-                    // THREE FIELDS OF SIX. `meta`, `display_name` and
-                    // `last_seen_at` are not on `RegisteredPath` and are not
-                    // put on the wire: this rpc answers what resolves, not what
-                    // a project is.
-                    .map(|project| pb::RegisteredPath {
-                        path: project.path,
-                        status: project.status,
-                        // A rename is an ALIAS and never a rewrite (D53), so a
-                        // walk consulting live paths only would strand every
-                        // descendant of a renamed parent. The store binds its
-                        // ancestor chain against live paths AND aliases; a walk
-                        // over this set is the same walk and needs both inputs.
-                        //
-                        // So the reserved-root guard runs on both inputs too
-                        // (ledger 764): the row stays, its alias at the bare
-                        // segment does not.
-                        aliases: project
-                            .aliases
-                            .into_iter()
-                            .filter(|alias| !is_reserved_root(alias))
-                            .collect(),
-                    })
-                    .collect();
-
-                Ok(pb::ProjectServiceListProjectsResponse {
-                    paths,
-                    // VERBATIM, and never recomputed from the rows that
-                    // survived the filter. The store's token is a keyset cursor
-                    // over ITS last row; deriving one from a filtered page would
-                    // skip every row between the two. Nor does this handler loop
-                    // on the caller's behalf — the contract puts that obligation
-                    // on the caller, and a set truncated here is not a smaller
-                    // registry but a wrong one.
-                    next_page_token: listed.next_page_token,
-                })
-            },
-            |r| Outcome {
-                status: "OK",
-                payload: format!("{r:?}"),
-                encoded_bytes: Some(prost::Message::encoded_len(r) as u64),
-                class: Class::Envelope,
-                // The row count for a list is the LIST, not one.
-                rows: r.paths.len() as u32,
-                ..Default::default()
-            },
-            status_name,
-        )
-        .await
-        .map(Response::new)
+        // READ BEFORE THE REQUEST IS CONSUMED, as `sync_projects` reads it: the
+        // peer chain lives on the request's extensions.
+        let caller = caller_common_name(&request);
+        self.list_as(caller.as_deref(), request).await
     }
 
     /// THE FALLBACK, not the hot path — asked when the caller has no loaded set

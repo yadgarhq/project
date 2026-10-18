@@ -31,7 +31,7 @@ use yadgar_project::pb::yadgar::project::v1::project_db_service_server::{
     ProjectDbService, ProjectDbServiceServer,
 };
 use yadgar_project::pb::yadgar::project::v1::project_service_server::ProjectService;
-use yadgar_project::service::Project;
+use yadgar_project::service::{Project, LIST_CALLER};
 
 // ---------------------------------------------------------------------------
 // Fixtures the implementation could not have chosen for itself.
@@ -260,10 +260,13 @@ async fn list_returning(
     .await;
 
     let got = svc
-        .list_projects(Request::new(pb::ProjectServiceListProjectsRequest {
-            page_size: 17,
-            page_token: CALLER_TOKEN.into(),
-        }))
+        .list_as(
+            Some(LIST_CALLER),
+            Request::new(pb::ProjectServiceListProjectsRequest {
+                page_size: 17,
+                page_token: CALLER_TOKEN.into(),
+            }),
+        )
         .await
         .expect("the store answered, so the call must")
         .into_inner();
@@ -443,6 +446,170 @@ async fn the_store_is_asked_for_the_whole_registry() {
 }
 
 // ---------------------------------------------------------------------------
+// ListProjects — the owner of a private row (ledger 1638, car P2).
+// ---------------------------------------------------------------------------
+
+/// The registrant `project-db` stores on a private row. Shaped like no other
+/// value in a fixture row, so a relay that copied `created_by`, `id` or
+/// `project_id` instead is caught rather than passing by coincidence.
+const STORE_OWNER: &str = "yadgar:user:0192f3c1-the-registrant-the-store-holds";
+
+/// A stored row whose `Meta` carries `owner`, and audit identities that are
+/// NOT the owner (D12 calls them audit identity, distinct from ownership).
+fn a_stored_row_owned_by(path: &str, owner: &str) -> pb::Project {
+    let mut row = a_stored_project(path, pb::ProjectStatus::Active);
+    let meta = row.meta.as_mut().expect("the fixture carries a Meta");
+    meta.owner_user_id = owner.into();
+    meta.created_by = "yadgar:user:the-auditor-not-the-owner".into();
+    meta.updated_by = "yadgar:user:the-auditor-not-the-owner".into();
+    row
+}
+
+/// `RegisteredPath.owner_user_id` (proto v1.20.0): the store's
+/// `Meta.owner_user_id`, relayed. On one page, the private row carries its
+/// owner and the org row carries `""` — the gateway reads the class from the
+/// path and fails closed on a private row with no owner, so both halves matter.
+///
+/// **THE MUTATIONS THAT RED IT:** leave the field empty (the private half), or
+/// relay `created_by` instead (both halves).
+#[tokio::test]
+async fn a_private_row_carries_its_owner_and_an_org_row_carries_empty() {
+    let (got, _) = list_returning(pb::ListProjectsResponse {
+        projects: vec![
+            a_stored_row_owned_by("local/the-owner/notes", STORE_OWNER),
+            a_stored_row_owned_by("acme/widgets", ""),
+        ],
+        next_page_token: String::new(),
+    })
+    .await;
+
+    let owners: Vec<(&str, &str)> = got
+        .paths
+        .iter()
+        .map(|p| (p.path.as_str(), p.owner_user_id.as_str()))
+        .collect();
+    assert_eq!(
+        owners,
+        vec![("local/the-owner/notes", STORE_OWNER), ("acme/widgets", "")]
+    );
+}
+
+/// The owner survives on a LATER page: the request carries a token, the store
+/// answers the page after it, and the private row on that page keeps its owner.
+/// The tier is stateless per page, so this pins that nothing in the relay
+/// depends on the page being the first.
+#[tokio::test]
+async fn a_private_row_on_a_later_page_keeps_its_owner() {
+    let (got, seen) = list_returning(pb::ListProjectsResponse {
+        projects: vec![a_stored_row_owned_by("local/the-owner/later", STORE_OWNER)],
+        next_page_token: STORE_TOKEN.into(),
+    })
+    .await;
+
+    assert_eq!(seen.lock().unwrap().list[0].page_token, CALLER_TOKEN);
+    assert_eq!(got.paths.len(), 1);
+    assert_eq!(got.paths[0].owner_user_id, STORE_OWNER);
+    assert_eq!(got.next_page_token, STORE_TOKEN);
+}
+
+/// A row with no `Meta` at all reports `""`, never a panic and never a
+/// substitute. The contract makes `""` on a private row mean "owned by
+/// nobody", and the gateway fails closed on it.
+#[tokio::test]
+async fn a_row_with_no_meta_carries_an_empty_owner() {
+    let mut row = a_stored_project("local/the-owner/bare", pb::ProjectStatus::Active);
+    row.meta = None;
+    let (got, _) = list_returning(pb::ListProjectsResponse {
+        projects: vec![row],
+        next_page_token: String::new(),
+    })
+    .await;
+
+    assert_eq!(got.paths[0].owner_user_id, "");
+}
+
+// ---------------------------------------------------------------------------
+// ListProjects — the caller check (ledger 1643).
+// ---------------------------------------------------------------------------
+
+/// Every caller but the gateway's leaf is refused `PERMISSION_DENIED`, and the
+/// store is never asked. The near misses are there because the comparison is
+/// EXACT. `None` is no TLS, no client certificate, or an ambiguous subject.
+///
+/// **THE MUTATION THAT REDS IT:** drop the check, or run it after the relay.
+#[tokio::test]
+async fn a_caller_other_than_the_gateway_is_refused_before_the_store() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+
+    for caller in [
+        Some("seeder-caller"),
+        Some("project-caller"),
+        Some("task-caller"),
+        Some("Gateway-caller"),
+        Some("gateway-caller "),
+        Some("gateway"),
+        None,
+    ] {
+        let err = svc
+            .list_as(
+                caller,
+                Request::new(pb::ProjectServiceListProjectsRequest::default()),
+            )
+            .await
+            .expect_err("only the gateway may load the registry");
+        assert_eq!(err.code(), Code::PermissionDenied, "{caller:?}: {err:?}");
+    }
+    assert!(
+        seen.lock().unwrap().list.is_empty(),
+        "a refused caller reached the store"
+    );
+}
+
+/// The trait method reads the caller off the peer chain, and a direct call has
+/// none, so it is refused. The wire half — a real leaf through the real
+/// listener — is in `tests/sync.rs`.
+#[tokio::test]
+async fn a_direct_list_call_has_no_peer_chain_and_is_refused() {
+    let (svc, seen) = a_store_answering_both_reads().await;
+
+    let err = svc
+        .list_projects(Request::new(
+            pb::ProjectServiceListProjectsRequest::default(),
+        ))
+        .await
+        .expect_err("no peer chain");
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert!(seen.lock().unwrap().list.is_empty());
+}
+
+/// A refusal is still a call, and D67 records it: the check runs inside the
+/// observed call, so the record carries the refusal rather than nothing.
+#[tokio::test]
+async fn a_refused_list_is_recorded_as_permission_denied() {
+    let (svc, _) = a_store_answering_both_reads().await;
+
+    let record = the_call_record(svc.list_as(
+        Some("seeder-caller"),
+        with_request_id(
+            pb::ProjectServiceListProjectsRequest::default(),
+            GATEWAY_REQUEST_ID,
+        ),
+    ))
+    .await;
+
+    assert!(record.contains("PERMISSION_DENIED"), "{record}");
+    assert!(carries(&record, GATEWAY_REQUEST_ID), "{record}");
+}
+
+/// Pinned by LITERAL (ADR-0599): `gateway-caller` is the common name
+/// `platform` writes on the gateway's client leaf (`chart/values.yaml`,
+/// `gateway-client-tls`). The two repositories share no crate.
+#[test]
+fn the_admitted_list_caller_is_the_gateway_leaf_platform_issues() {
+    assert_eq!(LIST_CALLER, "gateway-caller");
+}
+
+// ---------------------------------------------------------------------------
 // ResolveProject — a pass-through on the response, a rewrite of the request.
 // ---------------------------------------------------------------------------
 
@@ -561,9 +728,10 @@ async fn both_store_calls_carry_a_scope_because_the_store_refuses_an_absent_one(
     })
     .await;
 
-    svc.list_projects(Request::new(
-        pb::ProjectServiceListProjectsRequest::default(),
-    ))
+    svc.list_as(
+        Some(LIST_CALLER),
+        Request::new(pb::ProjectServiceListProjectsRequest::default()),
+    )
     .await
     .expect("the store answered");
     svc.resolve_project(Request::new(pb::ProjectServiceResolveProjectRequest {
@@ -671,9 +839,10 @@ async fn a_list_failure_passes_through_with_its_code_intact() {
     .await;
 
     let status = svc
-        .list_projects(Request::new(
-            pb::ProjectServiceListProjectsRequest::default(),
-        ))
+        .list_as(
+            Some(LIST_CALLER),
+            Request::new(pb::ProjectServiceListProjectsRequest::default()),
+        )
         .await
         .expect_err("the store failed, so the call must");
     assert_eq!(status.code(), Code::InvalidArgument);
@@ -749,10 +918,13 @@ async fn a_store_answering_both_reads() -> (Project, Arc<Mutex<Recorded>>) {
 async fn list_records_and_forwards_the_callers_request_id() {
     let (svc, seen) = a_store_answering_both_reads().await;
 
-    let record = the_call_record(svc.list_projects(with_request_id(
-        pb::ProjectServiceListProjectsRequest::default(),
-        GATEWAY_REQUEST_ID,
-    )))
+    let record = the_call_record(svc.list_as(
+        Some(LIST_CALLER),
+        with_request_id(
+            pb::ProjectServiceListProjectsRequest::default(),
+            GATEWAY_REQUEST_ID,
+        ),
+    ))
     .await;
 
     assert!(carries(&record, GATEWAY_REQUEST_ID), "{record}");
@@ -814,9 +986,10 @@ async fn an_over_long_request_id_is_capped_on_the_record_and_on_the_wire() {
 async fn an_absent_request_id_records_empty_and_forwards_nothing() {
     let (svc, seen) = a_store_answering_both_reads().await;
 
-    let list = the_call_record(svc.list_projects(Request::new(
-        pb::ProjectServiceListProjectsRequest::default(),
-    )))
+    let list = the_call_record(svc.list_as(
+        Some(LIST_CALLER),
+        Request::new(pb::ProjectServiceListProjectsRequest::default()),
+    ))
     .await;
     let resolve = the_call_record(svc.resolve_project(Request::new(
         pb::ProjectServiceResolveProjectRequest {
@@ -840,10 +1013,13 @@ async fn an_absent_request_id_records_empty_and_forwards_nothing() {
 async fn the_request_id_never_enters_the_placeholder_scope() {
     let (svc, seen) = a_store_answering_both_reads().await;
 
-    svc.list_projects(with_request_id(
-        pb::ProjectServiceListProjectsRequest::default(),
-        GATEWAY_REQUEST_ID,
-    ))
+    svc.list_as(
+        Some(LIST_CALLER),
+        with_request_id(
+            pb::ProjectServiceListProjectsRequest::default(),
+            GATEWAY_REQUEST_ID,
+        ),
+    )
     .await
     .expect("the store answered");
     svc.resolve_project(with_request_id(
