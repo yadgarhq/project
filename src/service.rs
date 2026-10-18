@@ -49,7 +49,14 @@ use crate::pb::yadgar::project::v1::project_service_server::ProjectService;
 /// already accepted, so the row can still arrive here.
 const RESERVED_ROOT: &str = "local";
 
-/// Whether a listed path is the bare reserved segment and must be dropped.
+/// Whether a listed path, or one of a listed row's aliases, is the bare
+/// reserved segment and must be dropped.
+///
+/// **PATHS AND ALIASES, BOTH (ledger 764).** `project-db/src/read.rs` drops the
+/// segment from the ancestor chain it binds against live paths AND aliases, so
+/// one line there closes both arms. A walk over this set is the same walk and
+/// consults both inputs, so an alias at `local` re-opens the hole exactly as a
+/// live path there would.
 ///
 /// **THE COMPARISON FOLDS ASCII CASE, and both halves of that matter.**
 /// `project.path` carries `COLLATE utf8mb4_general_ci`, declared by
@@ -100,24 +107,33 @@ fn is_reserved_root(path: &str) -> bool {
 /// it is ONE edit here, which is why this is a named function rather than
 /// `Default::default()` at two call sites.
 ///
-/// **AND THE TELEMETRY COST IS THE SAME EITHER WAY, so it does not choose
-/// between the routes.** `project-db`'s `tel_scope` resolves an absent field
-/// with `unwrap_or_default()`, so a minted default and a deleted check both
-/// leave D67's `request_id` join empty for these two RPCs. `request_id` is read
-/// only out of the `Scope` MESSAGE and never out of gRPC metadata, and neither
-/// request carries a `Scope` at all — so nothing this repository can do fills
-/// it.
+/// **AND THE TELEMETRY COST DOES NOT CHOOSE BETWEEN THE ROUTES.** D67's
+/// `request_id` does not travel in this value under any of them: the gateway
+/// stamps it on every upstream call as the `x-yadgar-request-id` header
+/// (ledger 1248), and this tier reads it from there, records it, and forwards
+/// it to `project-db` as the same header — see [`request_id_of`] and
+/// [`carrying`] (ledger 1254). It is NEVER copied in here: this value attests
+/// nothing, and an id inside it would read as one the gateway attested.
+///
+/// **THE TRIPWIRE IS IN `project-db` (ledger 762).** The premise "the store
+/// refuses an absent `Scope`" is pinned there by `tests/resolve.rs`'s
+/// `an_absent_scope_is_refused` and `tests/list.rs`'s
+/// `list_refuses_an_absent_scope`. Flipping those two is route (c), and the
+/// same PR train MUST delete this function and the two tests here that assert
+/// it is present — they run against a mock store, so nothing on this side
+/// reddens when the store stops demanding a `Scope`.
 fn unattested_placeholder_scope() -> Option<Scope> {
     Some(Scope::default())
 }
 
 /// Copy the scope fields a record needs.
 ///
-/// The `Scope` this tier holds is the placeholder above, so every field is
-/// empty. It is still built, and built at the one place `task` builds its own,
-/// so the shape of the seam is the estate's rather than this module's — and so
-/// that the day a real `Scope` reaches this tier, the telemetry follows it with
-/// no second change.
+/// On the two read verbs the `Scope` this tier holds is the placeholder above,
+/// so every field is empty, and [`tel_scope_joined`] supplies the `request_id`
+/// from the header instead. It is still built, and built at the one place
+/// `task` builds its own, so the shape of the seam is the estate's rather than
+/// this module's — and so that the day a real `Scope` reaches this tier, the
+/// telemetry follows it with no second change.
 fn tel_scope(scope: Option<&Scope>) -> yadgar_telemetry::observe::Scope {
     yadgar_telemetry::observe::Scope {
         request_id: scope.map(|s| s.request_id.clone()).unwrap_or_default(),
@@ -125,6 +141,21 @@ fn tel_scope(scope: Option<&Scope>) -> yadgar_telemetry::observe::Scope {
         user_id: scope.map(|s| s.user_id.clone()).unwrap_or_default(),
         project_id: scope.map(|s| s.project_id.clone()).unwrap_or_default(),
     }
+}
+
+/// [`tel_scope`], with the header's id standing in when the `Scope` carries
+/// none (ledger 1254).
+///
+/// **THE `Scope`'S OWN ID WINS WHEN IT HAS ONE.** On the two read verbs it never
+/// does — the placeholder is empty — so the header is the id. The order exists
+/// for the day a real `Scope` reaches this tier: an attested id is the stronger
+/// claim, and `project-db` resolves the two in the same order.
+fn tel_scope_joined(scope: Option<&Scope>, header: String) -> yadgar_telemetry::observe::Scope {
+    let mut tel = tel_scope(scope);
+    if tel.request_id.is_empty() {
+        tel.request_id = header;
+    }
+    tel
 }
 
 #[derive(Clone)]
@@ -142,7 +173,10 @@ impl Project {
 
 pub use sync::{SEEDER_PRINCIPAL, SYNC_CALLER};
 
+mod request_id;
 mod sync;
+
+use request_id::{carrying, request_id_of};
 
 /// A `-db` failure is passed through with its CODE intact but not its message.
 ///
@@ -204,6 +238,7 @@ impl ProjectService for Project {
         &self,
         request: Request<pb::ProjectServiceListProjectsRequest>,
     ) -> Result<Response<pb::ProjectServiceListProjectsResponse>, Status> {
+        let request_id = request_id_of(&request);
         let req = request.into_inner();
         let scope = unattested_placeholder_scope();
         // Started BEFORE the work, so the duration covers the handler.
@@ -211,7 +246,7 @@ impl ProjectService for Project {
             "project",
             "ListProjects",
             Kind::Read,
-            tel_scope(scope.as_ref()),
+            tel_scope_joined(scope.as_ref(), request_id.clone()),
         );
 
         call.run(
@@ -219,26 +254,29 @@ impl ProjectService for Project {
                 let listed = self
                     .db
                     .clone()
-                    .list_projects(pb::ListProjectsRequest {
-                        scope,
-                        // THE WHOLE REGISTRY, NEVER A SLICE. `under_path` is the
-                        // only field that could narrow it, and the caller of
-                        // this rpc is loading the set it will resolve every
-                        // future candidate against — a subtree would answer some
-                        // of them wrongly and none of them detectably.
-                        under_path: String::new(),
-                        // NOT FILTERED BY STATUS, AND IT MUST NOT BE.
-                        // `RegisteredPath`'s own comment: the store's resolution
-                        // walks live paths and aliases without consulting status
-                        // and reports the status it found, so a caller that
-                        // dropped archived rows from its own walk would resolve
-                        // a candidate to a different ancestor than
-                        // `ResolveProject` resolves it to — two answers for one
-                        // path, differing only in which route the caller took.
-                        status: None,
-                        page_size: req.page_size,
-                        page_token: req.page_token,
-                    })
+                    .list_projects(carrying(
+                        pb::ListProjectsRequest {
+                            scope,
+                            // THE WHOLE REGISTRY, NEVER A SLICE. `under_path` is the
+                            // only field that could narrow it, and the caller of
+                            // this rpc is loading the set it will resolve every
+                            // future candidate against — a subtree would answer some
+                            // of them wrongly and none of them detectably.
+                            under_path: String::new(),
+                            // NOT FILTERED BY STATUS, AND IT MUST NOT BE.
+                            // `RegisteredPath`'s own comment: the store's resolution
+                            // walks live paths and aliases without consulting status
+                            // and reports the status it found, so a caller that
+                            // dropped archived rows from its own walk would resolve
+                            // a candidate to a different ancestor than
+                            // `ResolveProject` resolves it to — two answers for one
+                            // path, differing only in which route the caller took.
+                            status: None,
+                            page_size: req.page_size,
+                            page_token: req.page_token,
+                        },
+                        &request_id,
+                    ))
                     .await
                     .map_err(|e| passthrough(e, "list"))?
                     .into_inner();
@@ -246,8 +284,8 @@ impl ProjectService for Project {
                 let paths = listed
                     .projects
                     .into_iter()
-                    // The bare reserved segment, dropped. See
-                    // [`is_reserved_root`].
+                    // The bare reserved segment, dropped as a path here and as
+                    // an alias below. See [`is_reserved_root`].
                     .filter(|project| !is_reserved_root(&project.path))
                     // THREE FIELDS OF SIX. `meta`, `display_name` and
                     // `last_seen_at` are not on `RegisteredPath` and are not
@@ -261,7 +299,15 @@ impl ProjectService for Project {
                         // descendant of a renamed parent. The store binds its
                         // ancestor chain against live paths AND aliases; a walk
                         // over this set is the same walk and needs both inputs.
-                        aliases: project.aliases,
+                        //
+                        // So the reserved-root guard runs on both inputs too
+                        // (ledger 764): the row stays, its alias at the bare
+                        // segment does not.
+                        aliases: project
+                            .aliases
+                            .into_iter()
+                            .filter(|alias| !is_reserved_root(alias))
+                            .collect(),
                     })
                     .collect();
 
@@ -301,13 +347,14 @@ impl ProjectService for Project {
         &self,
         request: Request<pb::ProjectServiceResolveProjectRequest>,
     ) -> Result<Response<pb::ProjectServiceResolveProjectResponse>, Status> {
+        let request_id = request_id_of(&request);
         let req = request.into_inner();
         let scope = unattested_placeholder_scope();
         let call = Call::start(
             "project",
             "ResolveProject",
             Kind::Read,
-            tel_scope(scope.as_ref()),
+            tel_scope_joined(scope.as_ref(), request_id.clone()),
         );
 
         call.run(
@@ -315,10 +362,13 @@ impl ProjectService for Project {
                 let resolved = self
                     .db
                     .clone()
-                    .resolve_project(pb::ResolveProjectRequest {
-                        scope,
-                        candidate_path: req.candidate_path,
-                    })
+                    .resolve_project(carrying(
+                        pb::ResolveProjectRequest {
+                            scope,
+                            candidate_path: req.candidate_path,
+                        },
+                        &request_id,
+                    ))
                     .await
                     .map_err(|e| passthrough(e, "resolve"))?
                     .into_inner();
@@ -396,43 +446,4 @@ impl ProjectService for Project {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The precision of the guard, asserted without a server: only the BARE
-    /// segment, and folded for ASCII case.
-    #[test]
-    fn the_reserved_root_guard_catches_the_bare_segment_in_any_ascii_case() {
-        for path in ["local", "LOCAL", "LoCaL", "lOcAl"] {
-            assert!(is_reserved_root(path), "{path} is the reserved segment");
-        }
-    }
-
-    #[test]
-    fn the_reserved_root_guard_catches_nothing_else() {
-        for path in [
-            "locals",
-            "local/home",
-            "LOCAL/home",
-            "lo-cal",
-            "l.ocal",
-            "lo_cal",
-            "acme/local",
-            "",
-        ] {
-            assert!(!is_reserved_root(path), "{path} is registrable");
-        }
-    }
-
-    /// The placeholder is PRESENT and EMPTY, and both halves are the point:
-    /// present because `scope_of` refuses an absent one, empty because this tier
-    /// has nothing to attest.
-    #[test]
-    fn the_placeholder_scope_is_present_and_attests_nothing() {
-        let scope = unattested_placeholder_scope().expect("the store refuses an absent scope");
-        assert_eq!(scope.request_id, "");
-        assert_eq!(scope.instance_id, "");
-        assert_eq!(scope.user_id, "");
-        assert_eq!(scope.project_id, "");
-    }
-}
+mod tests;
