@@ -18,9 +18,10 @@
 //! WHAT THE ASSERTIONS OVER `Recorded` ARE FOR. Three of this tier's four
 //! obligations are about the request it SENDS rather than the response it
 //! returns — `under_path` empty so the set is the whole registry, `status`
-//! unset so archived rows survive, and a `Scope` present because the store
-//! refuses an absent one. None of them is visible in a response, so the
-//! recorded request is the only place they can be pinned.
+//! unset so archived rows survive, and no `Scope` on either read, because this
+//! tier holds none and the store's reads accept its absence (ledger 762). None
+//! of them is visible in a response, so the recorded request is the only place
+//! they can be pinned.
 
 use std::sync::{Arc, Mutex};
 

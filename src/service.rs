@@ -85,10 +85,11 @@ fn is_reserved_root(path: &str) -> bool {
 /// Copy the scope fields a record needs.
 ///
 /// On the two read verbs this tier holds no `Scope`, so every field is empty,
-/// and [`tel_scope_joined`] supplies the `request_id` from the header instead. It is still built, and built at the one place
-/// `task` builds its own, so the shape of the seam is the estate's rather than
-/// this module's — and so that the day a real `Scope` reaches this tier, the
-/// telemetry follows it with no second change.
+/// and [`tel_scope_joined`] supplies the `request_id` from the header instead.
+/// It is still built, and built at the one place `task` builds its own, so
+/// the shape of the seam is the estate's rather than this module's — and so
+/// that the day a real `Scope` reaches this tier, the telemetry follows it with
+/// no second change.
 fn tel_scope(scope: Option<&Scope>) -> yadgar_telemetry::observe::Scope {
     yadgar_telemetry::observe::Scope {
         request_id: scope.map(|s| s.request_id.clone()).unwrap_or_default(),
