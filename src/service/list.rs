@@ -12,9 +12,7 @@ use yadgar_telemetry::observe::{Call, Outcome};
 use yadgar_telemetry::pb::yadgar::telemetry::v1::Kind;
 
 use super::request_id::{carrying, request_id_of};
-use super::{
-    is_reserved_root, passthrough, tel_scope_joined, unattested_placeholder_scope, Project,
-};
+use super::{is_reserved_root, passthrough, tel_scope_joined, Project};
 use crate::pb::yadgar::project::v1 as pb;
 
 /// The ONE caller `ListProjects` admits: the common name on the gateway's
@@ -55,14 +53,10 @@ impl Project {
             "project",
             "ListProjects",
             Kind::Read,
-            tel_scope_joined(
-                unattested_placeholder_scope().as_ref(),
-                request_id_of(&request),
-            ),
+            tel_scope_joined(None, request_id_of(&request)),
         );
         let request_id = request_id_of(&request);
         let req = request.into_inner();
-        let scope = unattested_placeholder_scope();
 
         call.run(
             async move {
@@ -75,7 +69,9 @@ impl Project {
                     .clone()
                     .list_projects(carrying(
                         pb::ListProjectsRequest {
-                            scope,
+                            // NO `Scope`: this tier holds none on this rpc, and
+                            // `project-db`'s reads accept its absence (ledger 762).
+                            scope: None,
                             // THE WHOLE REGISTRY, NEVER A SLICE. `under_path` is the
                             // only field that could narrow it, and the caller of
                             // this rpc is loading the set it will resolve every
