@@ -82,63 +82,14 @@ fn is_reserved_root(path: &str) -> bool {
     path.eq_ignore_ascii_case(RESERVED_ROOT)
 }
 
-/// The `Scope` this tier sends to the store, and it ATTESTS NOTHING.
-///
-/// **READ THIS BEFORE COPYING IT ANYWHERE.** `project-db/src/sql.rs`'s
-/// `scope_of` refuses an ABSENT `Scope` with the message "scope is required and
-/// is attested by the gateway", and **that sentence is false for this caller**.
-/// No gateway attested this value. It is `Scope::default()` — four empty strings
-/// — minted here because the store's check is `Option::as_ref` plus
-/// `ok_or_else` and nothing more: a presence check, not an authorisation one.
-/// Nothing in `project-db/src/read.rs` filters, keys or partitions on the value;
-/// all three call sites bind it as `let _scope = scope_of(&req.scope)?;` and
-/// never read it.
-///
-/// **NEITHER `ProjectService` READ REQUEST CARRIES A `Scope`, AND THAT IS THE
-/// POINT.** (`SyncProjects` does, because its caller is the seeder rather than
-/// the gateway, and it relays that Scope rather than this placeholder —
-/// ADR-0942.) `ListProjects`'s caller is a BOOT LOAD holding no token, no header
-/// and no request; `ResolveProject` is asked by the gateway WHILE CONSTRUCTING
-/// the estate's only `Scope`, so a `Scope`-carrying request would force a second
-/// provisional literal. There is therefore nothing here to forward, and this is
-/// a placeholder standing where a real value cannot yet exist.
-///
-/// **THE RULING THAT REPLACES IT IS OPEN.** `plans/the-project-logic-tier.md` §6
-/// names three routes and picks none: (a) the tier mints one — this, made
-/// deliberate; (b) both `ProjectService` requests gain a `Scope`, overruling the
-/// argument the contract file itself makes; (c) `ProjectDbService`'s `list` and
-/// `resolve` stop demanding one, which deletes a control that today refuses a
-/// caller who reached the store without passing the gateway. Whichever is ruled,
-/// it is ONE edit here, which is why this is a named function rather than
-/// `Default::default()` at two call sites.
-///
-/// **AND THE TELEMETRY COST DOES NOT CHOOSE BETWEEN THE ROUTES.** D67's
-/// `request_id` does not travel in this value under any of them: the gateway
-/// stamps it on every upstream call as the `x-yadgar-request-id` header
-/// (ledger 1248), and this tier reads it from there, records it, and forwards
-/// it to `project-db` as the same header — see [`request_id_of`] and
-/// [`carrying`] (ledger 1254). It is NEVER copied in here: this value attests
-/// nothing, and an id inside it would read as one the gateway attested.
-///
-/// **THE TRIPWIRE IS IN `project-db` (ledger 762).** The premise "the store
-/// refuses an absent `Scope`" is pinned there by `tests/resolve.rs`'s
-/// `an_absent_scope_is_refused` and `tests/list.rs`'s
-/// `list_refuses_an_absent_scope`. Flipping those two is route (c), and the
-/// same PR train MUST delete this function and the two tests here that assert
-/// it is present — they run against a mock store, so nothing on this side
-/// reddens when the store stops demanding a `Scope`.
-fn unattested_placeholder_scope() -> Option<Scope> {
-    Some(Scope::default())
-}
-
 /// Copy the scope fields a record needs.
 ///
-/// On the two read verbs the `Scope` this tier holds is the placeholder above,
-/// so every field is empty, and [`tel_scope_joined`] supplies the `request_id`
-/// from the header instead. It is still built, and built at the one place
-/// `task` builds its own, so the shape of the seam is the estate's rather than
-/// this module's — and so that the day a real `Scope` reaches this tier, the
-/// telemetry follows it with no second change.
+/// On the two read verbs this tier holds no `Scope`, so every field is empty,
+/// and [`tel_scope_joined`] supplies the `request_id` from the header instead.
+/// It is still built, and built at the one place `task` builds its own, so
+/// the shape of the seam is the estate's rather than this module's — and so
+/// that the day a real `Scope` reaches this tier, the telemetry follows it with
+/// no second change.
 fn tel_scope(scope: Option<&Scope>) -> yadgar_telemetry::observe::Scope {
     yadgar_telemetry::observe::Scope {
         request_id: scope.map(|s| s.request_id.clone()).unwrap_or_default(),
@@ -151,8 +102,8 @@ fn tel_scope(scope: Option<&Scope>) -> yadgar_telemetry::observe::Scope {
 /// [`tel_scope`], with the header's id standing in when the `Scope` carries
 /// none (ledger 1254).
 ///
-/// **THE `Scope`'S OWN ID WINS WHEN IT HAS ONE.** On the two read verbs it never
-/// does — the placeholder is empty — so the header is the id. The order exists
+/// **THE `Scope`'S OWN ID WINS WHEN IT HAS ONE.** On the two read verbs there is
+/// no `Scope`, so the header is the id. The order exists
 /// for the day a real `Scope` reaches this tier: an attested id is the stronger
 /// claim, and `project-db` resolves the two in the same order.
 fn tel_scope_joined(scope: Option<&Scope>, header: String) -> yadgar_telemetry::observe::Scope {
@@ -262,12 +213,11 @@ impl ProjectService for Project {
     ) -> Result<Response<pb::ProjectServiceResolveProjectResponse>, Status> {
         let request_id = request_id_of(&request);
         let req = request.into_inner();
-        let scope = unattested_placeholder_scope();
         let call = Call::start(
             "project",
             "ResolveProject",
             Kind::Read,
-            tel_scope_joined(scope.as_ref(), request_id.clone()),
+            tel_scope_joined(None, request_id.clone()),
         );
 
         call.run(
@@ -277,7 +227,9 @@ impl ProjectService for Project {
                     .clone()
                     .resolve_project(carrying(
                         pb::ResolveProjectRequest {
-                            scope,
+                            // NO `Scope`: this tier holds none on this rpc, and
+                            // `project-db`'s reads accept its absence (ledger 762).
+                            scope: None,
                             candidate_path: req.candidate_path,
                         },
                         &request_id,

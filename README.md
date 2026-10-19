@@ -127,32 +127,26 @@ which declared path the store refused.
 replica's next `ListProjects` relays the committed set. `tests/sync.rs` pins it
 with two replicas.
 
-## The `Scope` this tier sends attests nothing, and that is open
+## The two reads send no `Scope`
 
-`project-db` refuses a store call carrying no `yadgar.common.v1.Scope`, with the
-message _"scope is required and is attested by the gateway"_. **That sentence is
-false for this caller**, and `src/service.rs` says so where the value is made.
+Neither `ProjectService` READ request carries a `yadgar.common.v1.Scope`, and
+neither can: `ListProjects`'s caller is a boot load holding no token, no header
+and no request, and `ResolveProject` is asked by the gateway WHILE CONSTRUCTING
+the estate's only `Scope`. So there is nothing to forward, and this tier sends
+`scope: None` on `project-db`'s `ListProjects` and `ResolveProject`.
 
-Neither `ProjectService` READ request carries a `Scope`, and neither can:
-`ListProjects`'s caller is a boot load holding no token, no header and no
-request, and `ResolveProject` is asked by the gateway WHILE CONSTRUCTING the
-estate's only `Scope`. So there is nothing to forward. The store's check is
-`Option::as_ref` plus `ok_or_else` and nothing more — a presence check, not an
-authorisation one, and no handler in `project-db/src/read.rs` reads a field of
-the value it demands. `Some(Scope::default())` therefore satisfies it.
+`project-db`'s reads accept an absent `Scope` (ledger 762, route (c) of
+`plans/the-project-logic-tier.md` §6): no read there filters, keys or
+partitions on one. Until that change, `project-db` refused an absent `Scope`
+and this tier sent an empty placeholder to pass the check. **So `project-db`
+must be deployed with that change before this tier is**: this tier against an
+older `project-db` is refused on every read. `SyncProjects` is unaffected — it
+relays the seeder's own `Scope` (ADR-0942).
 
-**One site, deliberately.** `unattested_placeholder_scope` in `src/service.rs` is
-a named function rather than `Default::default()` at two call sites, because the
-ruling that replaces it is one edit whichever way it goes:
-`plans/the-project-logic-tier.md` §6 names three routes — the tier mints one, the
-contract grows one, or the store stops demanding one — and picks none.
-`tests/service.rs` pins the current answer so that change trips a test.
-
-The telemetry cost is the same under two of the three routes and so does not
-choose between them: `project-db`'s `tel_scope` resolves an absent field with
-`unwrap_or_default()`, and `request_id` is read only out of the `Scope` message
-and never out of gRPC metadata. A minted default and a deleted check both leave
-D67's `request_id` join empty for these two RPCs.
+D67's `request_id` does not travel in a `Scope` on these two calls. The gateway
+stamps it as the `x-yadgar-request-id` header (ledger 1248); this tier reads
+it, records it, and forwards it to `project-db` as the same header
+(ledger 1254).
 
 ## Client-side balancing
 

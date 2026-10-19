@@ -18,9 +18,10 @@
 //! WHAT THE ASSERTIONS OVER `Recorded` ARE FOR. Three of this tier's four
 //! obligations are about the request it SENDS rather than the response it
 //! returns — `under_path` empty so the set is the whole registry, `status`
-//! unset so archived rows survive, and a `Scope` present because the store
-//! refuses an absent one. None of them is visible in a response, so the
-//! recorded request is the only place they can be pinned.
+//! unset so archived rows survive, and no `Scope` on either read, because this
+//! tier holds none and the store's reads accept its absence (ledger 762). None
+//! of them is visible in a response, so the recorded request is the only place
+//! they can be pinned.
 
 use std::sync::{Arc, Mutex};
 
@@ -701,26 +702,21 @@ async fn an_inexact_resolution_is_not_an_error() {
 }
 
 // ---------------------------------------------------------------------------
-// The Scope the store demands and this tier does not hold.
+// The Scope this tier does not hold, and so does not send.
 // ---------------------------------------------------------------------------
 
-/// `project-db/src/sql.rs`'s `scope_of` refuses an ABSENT `Scope` and reads no
-/// field of a present one, so both store calls must carry one or every request
-/// this tier serves fails with `INVALID_ARGUMENT`.
+/// **NEITHER STORE READ CARRIES A `Scope` (ledger 762, route (c)).** Neither
+/// `ProjectService` read request carries one, so this tier has nothing to
+/// forward, and `project-db` accepts an absent `Scope` on its reads — pinned
+/// there by `list_accepts_an_absent_scope` (`tests/list.rs`) and
+/// `an_absent_scope_is_accepted` (`tests/resolve.rs`). D67's id travels as the
+/// `x-yadgar-request-id` header, which is why a header is sent here too: the
+/// id must never be copied into a `Scope` this tier would have to invent.
 ///
-/// **THIS TEST PINS A PLACEHOLDER, NOT A CONTROL.** The value attests nothing.
-/// It is asserted so that whichever of the plan's routes is ruled — the tier
-/// mints one, the contract grows one, or the store stops demanding one — the
-/// change trips a test rather than passing silently.
-///
-/// **AND IT CANNOT TRIP ON ROUTE (c) BY ITSELF (ledger 762).** The store here
-/// is a mock, so its premise — "the store refuses an absent one" — is pinned in
-/// `project-db` instead, by `an_absent_scope_is_refused` (`tests/resolve.rs`)
-/// and `list_refuses_an_absent_scope` (`tests/list.rs`). The PR that flips those
-/// two is route (c), and the same train MUST delete this test and
-/// `service.rs::unattested_placeholder_scope`.
+/// **THE MUTATION THAT REDS IT:** send `Some(Scope::default())`, or any
+/// `Scope`, on either call.
 #[tokio::test]
-async fn both_store_calls_carry_a_scope_because_the_store_refuses_an_absent_one() {
+async fn neither_store_read_carries_a_scope() {
     let (svc, seen) = wire(MockDb {
         list: Some(Ok(pb::ListProjectsResponse::default())),
         resolve: Some(Ok(pb::ResolveProjectResponse::default())),
@@ -730,26 +726,27 @@ async fn both_store_calls_carry_a_scope_because_the_store_refuses_an_absent_one(
 
     svc.list_as(
         Some(LIST_CALLER),
-        Request::new(pb::ProjectServiceListProjectsRequest::default()),
+        with_request_id(
+            pb::ProjectServiceListProjectsRequest::default(),
+            GATEWAY_REQUEST_ID,
+        ),
     )
     .await
     .expect("the store answered");
-    svc.resolve_project(Request::new(pb::ProjectServiceResolveProjectRequest {
-        candidate_path: CALLER_CANDIDATE.into(),
-    }))
+    svc.resolve_project(with_request_id(
+        pb::ProjectServiceResolveProjectRequest {
+            candidate_path: CALLER_CANDIDATE.into(),
+        },
+        GATEWAY_REQUEST_ID,
+    ))
     .await
     .expect("the store answered");
 
     let seen = seen.lock().unwrap();
-    assert!(
-        seen.list[0].scope.is_some(),
-        "an absent scope is refused by project-db before it reads a row — pinned \
-         there by list_refuses_an_absent_scope (tests/list.rs, ledger 762)"
-    );
-    assert!(
-        seen.resolve[0].scope.is_some(),
-        "an absent scope is refused by project-db before it reads a row — pinned \
-         there by an_absent_scope_is_refused (tests/resolve.rs, ledger 762)"
+    assert_eq!(seen.list[0].scope, None, "this tier holds no Scope to send");
+    assert_eq!(
+        seen.resolve[0].scope, None,
+        "this tier holds no Scope to send"
     );
 }
 
@@ -910,8 +907,8 @@ async fn a_store_answering_both_reads() -> (Project, Arc<Mutex<Recorded>>) {
 
 /// **THE ID THE GATEWAY SENT IS THE ONE THIS HOP RECORDS, AND THE ONE THE STORE
 /// RECEIVES.** `ListProjects` carries no `Scope`, so the header is the only
-/// place the id can come from; a handler reading the `Scope` alone records the
-/// placeholder's `""` and the call joins to nothing.
+/// place the id can come from; a handler reading the `Scope` alone records
+/// `""` and the call joins to nothing.
 ///
 /// **THE MUTATION THAT REDS IT:** drop the header read, or the forward.
 #[tokio::test]
@@ -1003,35 +1000,4 @@ async fn an_absent_request_id_records_empty_and_forwards_nothing() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.list_request_ids, vec![None]);
     assert_eq!(seen.resolve_request_ids, vec![None]);
-}
-
-/// **THE PLACEHOLDER STAYS EMPTY WHEN AN ID ARRIVES.** The header reaches the
-/// record and the wire as metadata; it is never copied into the `Scope` this
-/// tier sends, because that `Scope` attests nothing (ADR-0511) and a value in it
-/// would read as one the gateway attested (ledger 762).
-#[tokio::test]
-async fn the_request_id_never_enters_the_placeholder_scope() {
-    let (svc, seen) = a_store_answering_both_reads().await;
-
-    svc.list_as(
-        Some(LIST_CALLER),
-        with_request_id(
-            pb::ProjectServiceListProjectsRequest::default(),
-            GATEWAY_REQUEST_ID,
-        ),
-    )
-    .await
-    .expect("the store answered");
-    svc.resolve_project(with_request_id(
-        pb::ProjectServiceResolveProjectRequest {
-            candidate_path: CALLER_CANDIDATE.into(),
-        },
-        GATEWAY_REQUEST_ID,
-    ))
-    .await
-    .expect("the store answered");
-
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.list[0].scope.as_ref().unwrap().request_id, "");
-    assert_eq!(seen.resolve[0].scope.as_ref().unwrap().request_id, "");
 }

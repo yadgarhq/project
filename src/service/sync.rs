@@ -47,7 +47,7 @@ impl Project {
             .sync_projects(pb::SyncProjectsRequest {
                 // THE SEEDER'S SCOPE, AS RECEIVED. Its `request_id` was minted
                 // by the seeder and is relayed unchanged so D67's records join
-                // across both hops (ADR-0942). Never `unattested_placeholder_scope`.
+                // across both hops (ADR-0942).
                 scope,
                 roots,
                 projects,
