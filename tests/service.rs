@@ -978,7 +978,7 @@ async fn an_over_long_request_id_is_capped_on_the_record_and_on_the_wire() {
 
 /// No header, no id: the record carries `""` and the store receives NO header
 /// rather than an empty one. Never a refusal — telemetry does not fail a call
-/// (D25), and `ListProjects`'s boot-load caller may send no header at all.
+/// (D67), and `ListProjects`'s boot-load caller may send no header at all.
 #[tokio::test]
 async fn an_absent_request_id_records_empty_and_forwards_nothing() {
     let (svc, seen) = a_store_answering_both_reads().await;

@@ -25,7 +25,7 @@ projectDb:
 
   # HOW LONG ONE REQUEST TO project-db MAY WAIT for a peer that is connected and
   # never replies, in whole seconds (ADR-0705, ADR-0925 Q-C1). The binary has NO
-  # compiled-in default (ADR-0569); this explicit default is the only place 30
+  # compiled-in default (ADR-0569); this explicit default is the only place 14
   # lives, and `chart/values.schema.json` makes the key `required`.
   #
   # BOUNDED 14..=59 by `yadgar_dial`: below 14 the bound fires before HTTP/2
@@ -33,10 +33,14 @@ projectDb:
   # after the ingress has given up. `tests/chart_request_timeout.rs` holds the
   # schema's `minimum` and `maximum` to the pinned dial's own.
   #
-  # KEEP IT ABOVE project-db's pool acquire timeout (25s, ADR-0925): a request
-  # waiting on a pool slot must be allowed to wait as long as the pool does. The
-  # cross-chart check is ledger 1524, not this chart.
-  requestTimeoutSeconds: 30
+  # 14, THE FLOOR (ADR-1006, yaadgaar #337): each hop's timeout is strictly
+  # below its caller's, so the chain shrinks inward. The gateway calls this
+  # service with 30s; this service calls project-db with 14s; project-db's pool
+  # acquire is 12s. Keep it above that acquire timeout: a request waiting on a
+  # pool slot must be allowed to wait as long as the pool does. This chart
+  # cannot see its caller's timeout, so it carries no cross-chart check; the
+  # parent chart (`yadgarhq/yadgar`) is where "caller > callee" is checkable.
+  requestTimeoutSeconds: 14
 
   # The TRANSPORT to that twin. Everything in the cluster is cleartext today,
   # so a bearer token and every request body cross the pod network in the open;
@@ -265,6 +269,27 @@ tls:
 # unconditionally (step 2a, ADR-0569, ADR-0570), every pod polls
 # `shared/shared.yaml` on any install and will drain and exit when an operator
 # edits it. That is ADR-0523 working, not a fault.
+
+# THE PROTOCOL LIMITS THE gRPC LISTENER ENFORCES ON EVERY CONNECTION (ADR-1006).
+# CHART VALUES WITH DEFAULTS, NOT CONSTANTS: Max ruled on 2026-10-24 that an
+# operator can change them. The binary has NO default (ADR-0569, ADR-0705); each
+# of the four is rendered unconditionally into LISTEN_* and a pod missing one
+# refuses to boot, naming the variable and `server.limits.<leaf>`. The ranges
+# are `yadgar_lifecycle::serve_tls::ServerLimits`'s, held to the schema by
+# `tests/chart_server_limits.rs`; `keepaliveTimeoutSeconds` must also sit below
+# `keepaliveIntervalSeconds`, which `templates/render-checks.yaml` refuses.
+server:
+  # Connection age (ADR-1006, 30 min) omitted until tonic#2780 ships; yaadgaar #417.
+  limits:
+    # Most concurrent streams one connection may open. 1..=10000.
+    maxConcurrentStreams: 256
+    # How often an idle connection is PINGed, in seconds. 1..=3600.
+    keepaliveIntervalSeconds: 30
+    # How long a PING may go unanswered before the connection closes, in
+    # seconds. 1..=600, and strictly below `keepaliveIntervalSeconds`.
+    keepaliveTimeoutSeconds: 10
+    # The largest request header list, in bytes. 1024..=1048576.
+    maxHeaderListBytes: 16384
 
 # D68: scale on CONCURRENCY, not CPU. A -db waits on MariaDB and a logic service
 # waits on its -db, so both saturate at low CPU — a CPU-driven HPA stays quiet
