@@ -40,6 +40,7 @@ impl Project {
             roots,
             projects,
             allow_mass_archive,
+            allow_mass_revoke,
         } = req;
         let counts = self
             .db
@@ -52,6 +53,11 @@ impl Project {
                 roots,
                 projects,
                 allow_mass_archive,
+                // The mass-revoke guard (ADR-0963 (6)), relayed unchanged: the
+                // STORE applies it, because only the store knows how many grant
+                // rows it holds under the sync's lock. `roots` and `projects`
+                // carry each row's `grants` as declared.
+                allow_mass_revoke,
             })
             .await
             .map_err(relay_refusal)?
@@ -64,13 +70,23 @@ impl Project {
             archived,
             reactivated,
             unchanged,
+            grants_declared,
+            grants_inserted,
+            grants_deleted,
+            grants_unchanged,
         } = counts;
+        // `grants_declared` IS THE ECHO the seeder compares with what it sent:
+        // a relay that dropped it would make every grant look dropped.
         Ok(pb::ProjectServiceSyncProjectsResponse {
             inserted,
             updated,
             archived,
             reactivated,
             unchanged,
+            grants_declared,
+            grants_inserted,
+            grants_deleted,
+            grants_unchanged,
         })
     }
 }

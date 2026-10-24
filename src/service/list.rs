@@ -135,7 +135,7 @@ impl Project {
 
 /// One stored row as the load reports it.
 ///
-/// **FOUR FIELDS, AND THE FOURTH COMES FROM `Meta`.** `display_name`,
+/// **FIVE FIELDS; THE FOURTH COMES FROM `Meta`, THE FIFTH IS THE ROW'S GRANTS.** `display_name`,
 /// `last_seen_at` and the rest of `Meta` are not on `RegisteredPath` and are not
 /// put on the wire: this rpc answers what resolves and who owns a private row,
 /// not what a project is.
@@ -165,6 +165,11 @@ fn registered(project: pb::Project) -> pb::RegisteredPath {
             .meta
             .map(|meta| meta.owner_user_id)
             .unwrap_or_default(),
+        // THE ROW'S OWN TEAM GRANTS, AS THE STORE HOLDS THEM (team access
+        // stage 5, ADR-0962). Never inherited here: the gateway computes
+        // inheritance from the whole load. Relayed on a private row too, where
+        // the store holds none and the gateway ignores any (a store defect).
+        grants: project.grants,
     }
 }
 

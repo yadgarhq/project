@@ -85,6 +85,12 @@ fn store_counts() -> pb::SyncProjectsResponse {
         archived: 7,
         reactivated: 11,
         unchanged: 13,
+        // Team access stage 5: the grant echo counts, distinct from the five
+        // row counts and from each other.
+        grants_declared: 17,
+        grants_inserted: 19,
+        grants_deleted: 23,
+        grants_unchanged: 29,
     }
 }
 
@@ -93,7 +99,16 @@ fn declared(path: &str, display_name: &str, source_repo: &str) -> pb::DeclaredPr
         path: path.into(),
         display_name: display_name.into(),
         source_repo: source_repo.into(),
+        grants: Vec::new(),
     }
+}
+
+fn granted(mut d: pb::DeclaredProject, team: &str, level: pb::GrantLevel) -> pb::DeclaredProject {
+    d.grants.push(pb::DeclaredGrant {
+        team_id: team.into(),
+        level: level as i32,
+    });
+    d
 }
 
 fn seeder_scope(user_id: &str) -> common::Scope {
@@ -110,12 +125,25 @@ fn seeder_scope(user_id: &str) -> common::Scope {
 fn a_declaration(user_id: &str) -> pb::ProjectServiceSyncProjectsRequest {
     pb::ProjectServiceSyncProjectsRequest {
         scope: Some(seeder_scope(user_id)),
-        roots: vec![declared("tapir", "Tapir Org", "tapir/registry")],
+        // GRANTS ON A ROOT AND ON A PROJECT, and a project with none (team
+        // access stage 5): a relay that dropped `DeclaredProject.grants`
+        // fails the field-for-field assertion.
+        roots: vec![granted(
+            declared("tapir", "Tapir Org", "tapir/registry"),
+            "yadgar:team:administrators",
+            pb::GrantLevel::ReadWrite,
+        )],
         projects: vec![
-            declared("tapir/alpha", "Alpha", "tapir/alpha"),
+            granted(
+                declared("tapir/alpha", "Alpha", "tapir/alpha"),
+                "yadgar:team:readers",
+                pb::GrantLevel::Read,
+            ),
             declared("tapir/beta", "", "tapir/beta"),
         ],
         allow_mass_archive: true,
+        // SET, for the reason the mass-archive flag is.
+        allow_mass_revoke: true,
     }
 }
 
@@ -426,6 +454,10 @@ async fn the_seeder_s_leaf_reaches_the_store_and_its_counts_come_back_unchanged(
             archived: 7,
             reactivated: 11,
             unchanged: 13,
+            grants_declared: 17,
+            grants_inserted: 19,
+            grants_deleted: 23,
+            grants_unchanged: 29,
         }
     );
     let sent = a_declaration(SEEDER_PRINCIPAL);
@@ -436,6 +468,7 @@ async fn the_seeder_s_leaf_reaches_the_store_and_its_counts_come_back_unchanged(
             roots: sent.roots,
             projects: sent.projects,
             allow_mass_archive: true,
+            allow_mass_revoke: true,
         }],
         "one store call, carrying the declaration and the seeder's Scope unchanged"
     );
@@ -603,6 +636,11 @@ async fn a_store_refusal_is_relayed_with_its_code_and_message() {
             "the sync would archive 9 of 12 active org-class rows; set allow_mass_archive",
         ),
         (
+            Code::FailedPrecondition,
+            "this sync would delete 3 of the 4 stored team grants, which is more than half \
+             (ADR-0963 (6)), and nothing was written; send allow_mass_revoke",
+        ),
+        (
             Code::PermissionDenied,
             "SyncProjects is callable by `project` only",
         ),
@@ -722,4 +760,27 @@ async fn only_the_gateway_s_leaf_may_load_the_registry() {
         .expect("the gateway's leaf is admitted")
         .into_inner();
     assert_eq!(listed.paths.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Team access stage 5 — `allow_mass_revoke` absent reaches the store false.
+// ---------------------------------------------------------------------------
+
+/// The guard flag's DEFAULT is the guard ON. A declaration that does not set
+/// it reaches the store with it false, and one that sets it reaches the store
+/// true (the field-for-field case above); the fake asserts both.
+#[tokio::test]
+async fn red_stage5_an_absent_allow_mass_revoke_reaches_the_store_false() {
+    let store = FakeStore::answering(Ok(store_counts()));
+    let mut req = a_declaration(SEEDER_PRINCIPAL);
+    req.allow_mass_revoke = false;
+    project_over(&store)
+        .await
+        .sync_as(Some(SYNC_CALLER), req)
+        .await
+        .expect("relayed");
+    let syncs = store.syncs();
+    assert_eq!(syncs.len(), 1);
+    assert!(!syncs[0].allow_mass_revoke);
+    assert!(syncs[0].allow_mass_archive, "the other flag is untouched");
 }
