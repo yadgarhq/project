@@ -30,6 +30,7 @@
 //! The list also relays each private row's owner from `Meta.owner_user_id`.
 
 use tonic::{Request, Response, Status};
+use yadgar_dial::Deadline;
 use yadgar_lifecycle::serve_tls::caller_common_name;
 use yadgar_telemetry::estimator::Class;
 use yadgar_telemetry::grpc::status_name;
@@ -117,12 +118,21 @@ fn tel_scope_joined(scope: Option<&Scope>, header: String) -> yadgar_telemetry::
 #[derive(Clone)]
 pub struct Project {
     db: ProjectDbServiceClient<tonic::transport::Channel>,
+    /// The request timeout the channel was dialled with (ADR-1019): the most any
+    /// one `project-db` call may be given. A caller's deadline can only shorten
+    /// it.
+    ceiling: std::time::Duration,
 }
 
 impl Project {
-    pub fn new(channel: tonic::transport::Channel) -> Self {
+    /// `ceiling` is the `project-db` request timeout the chart sets, the value
+    /// `upstream::request_timeout_from_env` read and `upstream::connect` dialled
+    /// with. Every call to the store is bounded by `min(ceiling, caller's
+    /// remaining time)`.
+    pub fn new(channel: tonic::transport::Channel, ceiling: std::time::Duration) -> Self {
         Self {
             db: ProjectDbServiceClient::new(channel),
+            ceiling,
         }
     }
 }
@@ -177,11 +187,16 @@ fn passthrough(status: Status, op: &str) -> Status {
         // RECOVERABLY. Collapsing it into `INTERNAL` would make the recoverable
         // failure indistinguishable from a bug, and no client would retry it.
         //
-        // DEADLINE_EXCEEDED belongs with it rather than with the opaque arm: the
-        // store did not refuse the work, it did not answer in time — a transient
-        // condition of the same shape, and one a caller acts on identically.
-        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+        tonic::Code::Unavailable => {
             Status::unavailable("the project registry could not be reached in time — retry")
+        }
+        // DEADLINE_EXCEEDED STAYS ITSELF (ADR-1019). The store's time ran out,
+        // and either the caller's deadline set it (`Deadline::call` labels its
+        // own cut-off this way) or the store's own did. A caller that reads
+        // UNAVAILABLE retries into a budget that is already spent; one that
+        // reads DEADLINE_EXCEEDED knows it is.
+        tonic::Code::DeadlineExceeded => {
+            Status::deadline_exceeded("the project registry did not answer in time")
         }
         _ => Status::internal("the project registry is unavailable"),
     }
@@ -212,6 +227,8 @@ impl ProjectService for Project {
         request: Request<pb::ProjectServiceResolveProjectRequest>,
     ) -> Result<Response<pb::ProjectServiceResolveProjectResponse>, Status> {
         let request_id = request_id_of(&request);
+        // READ BEFORE THE REQUEST IS CONSUMED, as the request id is (ADR-1019).
+        let deadline = Deadline::of(&request);
         let req = request.into_inner();
         let call = Call::start(
             "project",
@@ -222,18 +239,18 @@ impl ProjectService for Project {
 
         call.run(
             async move {
-                let resolved = self
-                    .db
-                    .clone()
-                    .resolve_project(carrying(
-                        pb::ResolveProjectRequest {
-                            // NO `Scope`: this tier holds none on this rpc, and
-                            // `project-db`'s reads accept its absence (ledger 762).
-                            scope: None,
-                            candidate_path: req.candidate_path,
-                        },
-                        &request_id,
-                    ))
+                let store = carrying(
+                    pb::ResolveProjectRequest {
+                        // NO `Scope`: this tier holds none on this rpc, and
+                        // `project-db`'s reads accept its absence (ledger 762).
+                        scope: None,
+                        candidate_path: req.candidate_path,
+                    },
+                    &request_id,
+                );
+                let mut db = self.db.clone();
+                let resolved = deadline
+                    .call(self.ceiling, store, |r| db.resolve_project(r))
                     .await
                     .map_err(|e| passthrough(e, "resolve"))?
                     .into_inner();
@@ -283,6 +300,7 @@ impl ProjectService for Project {
         // READ BEFORE THE REQUEST IS CONSUMED: the peer chain lives on the
         // request's extensions, and `into_inner` drops them.
         let caller = caller_common_name(&request);
+        let deadline = Deadline::of(&request);
         let req = request.into_inner();
         let call = Call::start(
             "project",
@@ -292,7 +310,7 @@ impl ProjectService for Project {
         );
 
         call.run(
-            async move { self.sync_as(caller.as_deref(), req).await },
+            async move { self.sync_as(caller.as_deref(), deadline, req).await },
             |r| Outcome {
                 status: "OK",
                 payload: format!("{r:?}"),

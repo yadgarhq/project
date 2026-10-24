@@ -39,6 +39,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::{Code, Request, Response, Status};
 
+use yadgar_dial::Deadline;
 use yadgar_project::pb::yadgar::common::v1 as common;
 use yadgar_project::pb::yadgar::project::v1 as pb;
 use yadgar_project::pb::yadgar::project::v1::project_db_service_server::{
@@ -158,13 +159,34 @@ fn a_declaration(user_id: &str) -> pb::ProjectServiceSyncProjectsRequest {
 #[derive(Default)]
 struct Held {
     syncs: Vec<pb::SyncProjectsRequest>,
+    /// The `grpc-timeout` each sync arrived with (ADR-1019); `None` is none.
+    sync_timeouts: Vec<Option<Duration>>,
     paths: Vec<String>,
+}
+
+/// A `grpc-timeout` as a `Duration`, parsed from its wire form here rather than
+/// through `yadgar-dial`, so the test does not trust the code it checks.
+fn grpc_timeout<T>(request: &Request<T>) -> Option<Duration> {
+    let raw = request.metadata().get("grpc-timeout")?.to_str().ok()?;
+    let (digits, unit) = raw.split_at(raw.len() - 1);
+    let n: u64 = digits.parse().ok()?;
+    Some(match unit {
+        "H" => Duration::from_secs(n * 3600),
+        "M" => Duration::from_secs(n * 60),
+        "S" => Duration::from_secs(n),
+        "m" => Duration::from_millis(n),
+        "u" => Duration::from_micros(n),
+        "n" => Duration::from_nanos(n),
+        other => panic!("grpc-timeout unit {other:?} in {raw:?}"),
+    })
 }
 
 #[derive(Clone)]
 struct FakeStore {
     /// `Ok(counts)` applies the declaration; `Err((code, message))` refuses it.
     outcome: Result<pb::SyncProjectsResponse, (Code, &'static str)>,
+    /// Never answers `SyncProjects`.
+    hang: bool,
     held: Arc<Mutex<Held>>,
 }
 
@@ -172,6 +194,7 @@ impl FakeStore {
     fn answering(outcome: Result<pb::SyncProjectsResponse, (Code, &'static str)>) -> Self {
         Self {
             outcome,
+            hang: false,
             held: Arc::default(),
         }
     }
@@ -255,8 +278,14 @@ impl ProjectDbService for FakeStore {
         &self,
         request: Request<pb::SyncProjectsRequest>,
     ) -> Result<Response<pb::SyncProjectsResponse>, Status> {
+        let timeout = grpc_timeout(&request);
         let req = request.into_inner();
+        if self.hang {
+            self.held.lock().unwrap().sync_timeouts.push(timeout);
+            std::future::pending::<()>().await;
+        }
         let mut held = self.held.lock().unwrap();
+        held.sync_timeouts.push(timeout);
         held.syncs.push(req.clone());
         match &self.outcome {
             Ok(counts) => {
@@ -295,7 +324,7 @@ async fn replica(addr: SocketAddr) -> Project {
         .connect()
         .await
         .expect("the fake store accepted the connection");
-    Project::new(channel)
+    Project::new(channel, Duration::from_secs(20))
 }
 
 async fn project_over(store: &FakeStore) -> Project {
@@ -543,7 +572,7 @@ async fn a_call_with_no_caller_identity_is_refused() {
     let store = FakeStore::answering(Ok(store_counts()));
     let err = project_over(&store)
         .await
-        .sync_as(None, a_declaration(SEEDER_PRINCIPAL))
+        .sync_as(None, Deadline::none(), a_declaration(SEEDER_PRINCIPAL))
         .await
         .expect_err("no identity is no seeder");
     assert_eq!(err.code(), Code::PermissionDenied);
@@ -572,7 +601,7 @@ async fn the_seeder_s_leaf_with_any_other_principal_is_refused() {
         "yadgar:system:gateway",
     ] {
         let err = project
-            .sync_as(Some(SYNC_CALLER), a_declaration(user_id))
+            .sync_as(Some(SYNC_CALLER), Deadline::none(), a_declaration(user_id))
             .await
             .expect_err(user_id);
         assert_eq!(err.code(), Code::PermissionDenied, "{user_id:?}: {err:?}");
@@ -586,7 +615,7 @@ async fn the_seeder_s_leaf_with_any_other_principal_is_refused() {
     let mut no_scope = a_declaration(SEEDER_PRINCIPAL);
     no_scope.scope = None;
     let err = project
-        .sync_as(Some(SYNC_CALLER), no_scope)
+        .sync_as(Some(SYNC_CALLER), Deadline::none(), no_scope)
         .await
         .expect_err("no Scope is no principal");
     assert_eq!(err.code(), Code::PermissionDenied);
@@ -649,7 +678,11 @@ async fn a_store_refusal_is_relayed_with_its_code_and_message() {
         let store = FakeStore::answering(Err((code, message)));
         let err = project_over(&store)
             .await
-            .sync_as(Some(SYNC_CALLER), a_declaration(SEEDER_PRINCIPAL))
+            .sync_as(
+                Some(SYNC_CALLER),
+                Deadline::none(),
+                a_declaration(SEEDER_PRINCIPAL),
+            )
             .await
             .expect_err(message);
         assert_eq!(err.code(), code, "{message}");
@@ -776,11 +809,63 @@ async fn red_stage5_an_absent_allow_mass_revoke_reaches_the_store_false() {
     req.allow_mass_revoke = false;
     project_over(&store)
         .await
-        .sync_as(Some(SYNC_CALLER), req)
+        .sync_as(Some(SYNC_CALLER), Deadline::none(), req)
         .await
         .expect("relayed");
     let syncs = store.syncs();
     assert_eq!(syncs.len(), 1);
     assert!(!syncs[0].allow_mass_revoke);
     assert!(syncs[0].allow_mass_archive, "the other flag is untouched");
+}
+
+// ---------------------------------------------------------------------------
+// ADR-1019 — the seeder's deadline bounds the store call.
+// ---------------------------------------------------------------------------
+
+/// The seeder gave 300 ms and the store never answers: the store is told no
+/// more than 250 ms and the sync answers DEADLINE_EXCEEDED, code intact through
+/// `relay_refusal`, before the 300 ms is up.
+#[tokio::test]
+async fn red_adr1019_sync_gives_up_with_its_caller() {
+    let mut store = FakeStore::answering(Ok(store_counts()));
+    store.hang = true;
+    let svc = project_over(&store).await;
+
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(
+        Duration::from_secs(2),
+        svc.sync_as(
+            Some(SYNC_CALLER),
+            Deadline::after(Duration::from_millis(300)),
+            a_declaration(SEEDER_PRINCIPAL),
+        ),
+    )
+    .await
+    .expect("the sync must give up on its own, not wait for the store")
+    .expect_err("the store never answers");
+
+    assert_eq!(err.code(), Code::DeadlineExceeded, "{err:?}");
+    assert!(started.elapsed() < Duration::from_millis(300));
+    let told = store.held.lock().unwrap().sync_timeouts[0].expect("a grpc-timeout");
+    assert!(told <= Duration::from_millis(250), "told {told:?}");
+}
+
+/// No deadline: the store is told the ceiling this replica was built with
+/// (20 s in `replica`).
+#[tokio::test]
+async fn red_adr1019_sync_without_a_deadline_is_stamped_with_the_ceiling() {
+    let store = FakeStore::answering(Ok(store_counts()));
+    project_over(&store)
+        .await
+        .sync_as(
+            Some(SYNC_CALLER),
+            Deadline::none(),
+            a_declaration(SEEDER_PRINCIPAL),
+        )
+        .await
+        .expect("relayed");
+    assert_eq!(
+        store.held.lock().unwrap().sync_timeouts,
+        vec![Some(Duration::from_secs(20))]
+    );
 }
