@@ -51,7 +51,9 @@
 
 use tonic::transport::Server;
 
-pub use yadgar_lifecycle::serve_tls::{ClientAuth, ServeTlsError, ServerTls, LISTEN};
+pub use yadgar_lifecycle::serve_tls::{
+    ClientAuth, ServeTlsError, ServerLimits, ServerLimitsError, ServerTls, LISTEN,
+};
 
 /// The chart values block this listener's keys render from. The shared type
 /// appends the leaf to it, so a refusal names `tls.enabled`, `tls.clientAuth`,
@@ -61,6 +63,13 @@ pub use yadgar_lifecycle::serve_tls::{ClientAuth, ServeTlsError, ServerTls, LIST
 /// literal typed out at the call site and again in a test could diverge from
 /// the one `boot.rs` actually passes with nothing to notice.
 pub const CHART_KEY: &str = "tls";
+
+/// The chart values block the listener's four protocol limits render from
+/// (ADR-1006). The shared type appends the leaf, so a refusal names
+/// `server.limits.maxConcurrentStreams` and its four siblings beside the
+/// variable. Read by `boot.rs` and by every test that names it, for the reason
+/// [`CHART_KEY`] gives.
+pub const LIMITS_CHART_KEY: &str = "server.limits";
 
 /// Build the gRPC server this service listens with.
 ///
@@ -79,8 +88,11 @@ pub const CHART_KEY: &str = "tls";
 /// acceptor's protocol list; the handshake tests in `tests/serve_tls.rs` fail
 /// if it ever stops being offered, because tonic's own client refuses a channel
 /// that negotiated anything else.
-pub fn builder(tls: Option<&ServerTls>) -> Result<Server, ServeTlsError> {
-    yadgar_lifecycle::serve_tls::server(tls)
+///
+/// **`limits` ARE APPLIED ON BOTH ARMS** (ADR-1006): no server leaves this
+/// binary on tonic's unbounded defaults, TLS or cleartext.
+pub fn builder(tls: Option<&ServerTls>, limits: &ServerLimits) -> Result<Server, ServeTlsError> {
+    yadgar_lifecycle::serve_tls::server(tls, limits)
 }
 
 #[cfg(test)]

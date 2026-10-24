@@ -110,7 +110,16 @@ REQUIRED_NO_DEFAULT = ("tls.enabled", "projectDb.tls.enabled")
 # overwrites it with the typed node. The bounds are `yadgar_dial`'s
 # `min_request_timeout()` / `max_request_timeout()`;
 # `tests/chart_request_timeout.rs` holds them to the pinned crate.
-REQUIRED_BOUNDED_INTEGER = {"projectDb.requestTimeoutSeconds": (14, 59)}
+REQUIRED_BOUNDED_INTEGER = {
+    "projectDb.requestTimeoutSeconds": (14, 59),
+    # The four listener limits (ADR-1006). Ranges are
+    # `yadgar_lifecycle::serve_tls::ServerLimits`'s; `tests/chart_server_limits.rs`
+    # holds them to the pinned crate.
+    "server.limits.maxConcurrentStreams": (1, 10000),
+    "server.limits.keepaliveIntervalSeconds": (1, 3600),
+    "server.limits.keepaliveTimeoutSeconds": (1, 600),
+    "server.limits.maxHeaderListBytes": (1024, 1048576),
+}
 
 
 def load_values() -> dict:

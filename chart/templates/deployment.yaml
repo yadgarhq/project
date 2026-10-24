@@ -295,6 +295,20 @@ spec:
             - name: LISTEN_TLS_CLIENT_AUTH
               value: {{ .Values.tls.clientAuth | quote }}
             {{- end }}
+            # THE LISTENER'S PROTOCOL LIMITS (ADR-1006). UNCONDITIONAL, like every
+            # other knob the binary has no default for (ADR-0569): it refuses the
+            # boot on an absent, non-numeric or out-of-range value, naming the
+            # variable and `server.limits.<leaf>`. Ranges are in
+            # `values.schema.json`; the keepalive cross-key rule is in
+            # `templates/render-checks.yaml`.
+            - name: LISTEN_MAX_CONCURRENT_STREAMS
+              value: {{ .Values.server.limits.maxConcurrentStreams | int64 | quote }}
+            - name: LISTEN_KEEPALIVE_INTERVAL_SECS
+              value: {{ .Values.server.limits.keepaliveIntervalSeconds | int64 | quote }}
+            - name: LISTEN_KEEPALIVE_TIMEOUT_SECS
+              value: {{ .Values.server.limits.keepaliveTimeoutSeconds | int64 | quote }}
+            - name: LISTEN_MAX_HEADER_LIST_BYTES
+              value: {{ .Values.server.limits.maxHeaderListBytes | int64 | quote }}
           # This service does NOT wait for project-db before listening, so the port
           # opening means "process up", not "dependency healthy" — deliberately.
           # Blocking startup on a -db that is still migrating would turn one

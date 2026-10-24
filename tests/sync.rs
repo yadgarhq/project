@@ -48,7 +48,23 @@ use yadgar_project::pb::yadgar::project::v1::project_service_client::ProjectServ
 use yadgar_project::pb::yadgar::project::v1::project_service_server::{
     ProjectService, ProjectServiceServer,
 };
-use yadgar_project::serve::{self, ServerTls, LISTEN};
+use yadgar_project::serve::{self, ServerLimits, ServerTls, LISTEN};
+
+/// The chart's ADR-1006 defaults, read through the same parser the binary uses.
+fn limits() -> ServerLimits {
+    ServerLimits::from_lookup(LISTEN, serve::LIMITS_CHART_KEY, |key| {
+        let value = match key.strip_prefix("LISTEN_")? {
+            "MAX_CONCURRENT_STREAMS" => "256",
+            "KEEPALIVE_INTERVAL_SECS" => "30",
+            "KEEPALIVE_TIMEOUT_SECS" => "10",
+            "MAX_HEADER_LIST_BYTES" => "16384",
+            _ => return None,
+        };
+        Some(value.to_string())
+    })
+    .expect("the chart defaults are inside the library's ranges")
+}
+
 use yadgar_project::service::{Project, SEEDER_PRINCIPAL, SYNC_CALLER};
 
 // ---------------------------------------------------------------------------
@@ -353,7 +369,7 @@ async fn serve_project(pki: &Pki, project: Project) -> (u16, [TempPem; 3]) {
         .await
         .unwrap();
     let port = listener.local_addr().unwrap().port();
-    let router = serve::builder(Some(&tls))
+    let router = serve::builder(Some(&tls), &limits())
         .unwrap()
         .add_service(ProjectServiceServer::new(project));
     tokio::spawn(async move {

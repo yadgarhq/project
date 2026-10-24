@@ -95,9 +95,13 @@ fn values_default() -> u64 {
 }
 
 #[test]
-fn the_chart_default_is_30_and_inside_the_bounds() {
+fn the_chart_default_is_14_and_inside_the_bounds() {
     let default = values_default();
-    assert_eq!(default, 30, "the ruled default (ADR-0925 Q-C4) moved");
+    assert_eq!(
+        default, 14,
+        "the ruled default (ADR-1006, yaadgaar #337) moved: each hop sits strictly below its \
+         caller, and the gateway calls this service with 30s"
+    );
     assert!(
         (yadgar_dial::min_request_timeout().as_secs()
             ..=yadgar_dial::max_request_timeout().as_secs())
@@ -105,9 +109,13 @@ fn the_chart_default_is_30_and_inside_the_bounds() {
         "the chart default is outside the range the binary accepts"
     );
     assert!(
-        default > 25,
-        "the request timeout must stay above the -db's pool acquire timeout (25s), or a request \
-         waiting on a pool slot is cut before the pool gives up"
+        default > 12,
+        "the request timeout must stay above the -db's pool acquire timeout (12s, ADR-1006), or a \
+         request waiting on a pool slot is cut before the pool gives up"
+    );
+    assert!(
+        default < 30,
+        "the request timeout must stay below the gateway's 30s call to this service (ADR-1006)"
     );
 }
 
