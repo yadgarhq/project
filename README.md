@@ -188,9 +188,11 @@ A permanent gap — an unusable CA bundle, a missing client certificate, a host
 that is not a URI authority — still fails boot. A transient absence dials lazily.
 
 `passthrough` in `src/service.rs` is where the contract is kept: a `-db`
-answering `UNAVAILABLE` or `DEADLINE_EXCEEDED` reaches the caller as
-`UNAVAILABLE`, and `NOT_FOUND` reaches it as `NOT_FOUND` — one condition
-carrying one code across both tiers, which is what the contract asks for. The
+answering `UNAVAILABLE` reaches the caller as `UNAVAILABLE`, `DEADLINE_EXCEEDED`
+as `DEADLINE_EXCEEDED` (ADR-1019: the caller's deadline bounds every `-db` call,
+and a spent budget must not read as a retryable outage), and `NOT_FOUND` as
+`NOT_FOUND` — one condition carrying one code across both tiers, which is what
+the contract asks for. The
 store's MESSAGE never reaches a caller: it may name tables and columns.
 
 ## SIGTERM, not SIGINT

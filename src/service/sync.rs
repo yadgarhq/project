@@ -7,6 +7,7 @@
 //! [`Project::sync_as`].
 
 use tonic::Status;
+use yadgar_dial::Deadline;
 
 use super::Project;
 use crate::pb::yadgar::common::v1::Scope;
@@ -29,6 +30,7 @@ impl Project {
     pub async fn sync_as(
         &self,
         caller: Option<&str>,
+        deadline: Deadline,
         req: pb::ProjectServiceSyncProjectsRequest,
     ) -> Result<pb::ProjectServiceSyncProjectsResponse, Status> {
         admit(caller, req.scope.as_ref())?;
@@ -42,23 +44,26 @@ impl Project {
             allow_mass_archive,
             allow_mass_revoke,
         } = req;
-        let counts = self
-            .db
-            .clone()
-            .sync_projects(pb::SyncProjectsRequest {
-                // THE SEEDER'S SCOPE, AS RECEIVED. Its `request_id` was minted
-                // by the seeder and is relayed unchanged so D67's records join
-                // across both hops (ADR-0942).
-                scope,
-                roots,
-                projects,
-                allow_mass_archive,
-                // The mass-revoke guard (ADR-0963 (6)), relayed unchanged: the
-                // STORE applies it, because only the store knows how many grant
-                // rows it holds under the sync's lock. `roots` and `projects`
-                // carry each row's `grants` as declared.
-                allow_mass_revoke,
-            })
+        let store = tonic::Request::new(pb::SyncProjectsRequest {
+            // THE SEEDER'S SCOPE, AS RECEIVED. Its `request_id` was minted
+            // by the seeder and is relayed unchanged so D67's records join
+            // across both hops (ADR-0942).
+            scope,
+            roots,
+            projects,
+            allow_mass_archive,
+            // The mass-revoke guard (ADR-0963 (6)), relayed unchanged: the
+            // STORE applies it, because only the store knows how many grant
+            // rows it holds under the sync's lock. `roots` and `projects`
+            // carry each row's `grants` as declared.
+            allow_mass_revoke,
+        });
+        // BOUNDED BY THE SEEDER'S DEADLINE (ADR-1019), as the reads are. The
+        // seeder is a Job with a budget of its own, and a sync it has given up
+        // on must not keep a transaction open in the store.
+        let mut db = self.db.clone();
+        let counts = deadline
+            .call(self.ceiling, store, |r| db.sync_projects(r))
             .await
             .map_err(relay_refusal)?
             .into_inner();
