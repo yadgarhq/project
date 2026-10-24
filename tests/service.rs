@@ -81,6 +81,7 @@ fn a_stored_project(path: &str, status: pb::ProjectStatus) -> pb::Project {
             nanos: 0,
         }),
         aliases: vec!["acme/the-former-path".into()],
+        grants: Vec::new(),
     }
 }
 
@@ -511,6 +512,80 @@ async fn a_private_row_on_a_later_page_keeps_its_owner() {
     assert_eq!(got.paths.len(), 1);
     assert_eq!(got.paths[0].owner_user_id, STORE_OWNER);
     assert_eq!(got.next_page_token, STORE_TOKEN);
+}
+
+/// A stored row carrying `grants` of its own (team access stage 5).
+fn a_stored_row_granting(path: &str, grants: &[(&str, pb::GrantLevel)]) -> pb::Project {
+    let mut row = a_stored_project(path, pb::ProjectStatus::Active);
+    row.grants = grants
+        .iter()
+        .map(|(team, level)| pb::DeclaredGrant {
+            team_id: (*team).into(),
+            level: *level as i32,
+        })
+        .collect();
+    row
+}
+
+/// Team access stage 5: `RegisteredPath.grants` (field 5) is the store's
+/// `Project.grants`, relayed in order on the first page and on a later one.
+/// An org row with no grant relays an empty list, never a substitute. The
+/// mutation that reds it: leave the field empty, the default a relay that
+/// forgot it sends.
+#[tokio::test]
+async fn red_stage5_grants_survive_the_relay_on_both_pages_of_a_two_page_load() {
+    let first = [
+        ("yadgar:team:administrators", pb::GrantLevel::ReadWrite),
+        ("yadgar:team:estate-runners", pb::GrantLevel::Read),
+    ];
+    let (got, _) = list_returning(pb::ListProjectsResponse {
+        projects: vec![
+            a_stored_row_granting("tapir", &first),
+            a_stored_row_granting("tapir/ungranted", &[]),
+        ],
+        next_page_token: STORE_TOKEN.into(),
+    })
+    .await;
+    let teams = |p: &pb::RegisteredPath| -> Vec<(String, i32)> {
+        p.grants
+            .iter()
+            .map(|g| (g.team_id.clone(), g.level))
+            .collect()
+    };
+    assert_eq!(
+        teams(&got.paths[0]),
+        vec![
+            (
+                "yadgar:team:administrators".to_string(),
+                pb::GrantLevel::ReadWrite as i32
+            ),
+            (
+                "yadgar:team:estate-runners".to_string(),
+                pb::GrantLevel::Read as i32
+            ),
+        ]
+    );
+    assert!(
+        got.paths[1].grants.is_empty(),
+        "an ungranted org row relays []"
+    );
+
+    let (later, seen) = list_returning(pb::ListProjectsResponse {
+        projects: vec![a_stored_row_granting(
+            "tapir/later",
+            &[("yadgar:team:readers", pb::GrantLevel::Read)],
+        )],
+        next_page_token: String::new(),
+    })
+    .await;
+    assert_eq!(seen.lock().unwrap().list[0].page_token, CALLER_TOKEN);
+    assert_eq!(
+        teams(&later.paths[0]),
+        vec![(
+            "yadgar:team:readers".to_string(),
+            pb::GrantLevel::Read as i32
+        )]
+    );
 }
 
 /// A row with no `Meta` at all reports `""`, never a panic and never a
