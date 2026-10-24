@@ -23,7 +23,9 @@
 //! of them is visible in a response, so the recorded request is the only place
 //! they can be pinned.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tonic::{Code, Request, Response, Status};
 use yadgar_project::pb::yadgar::common::v1 as common;
@@ -104,6 +106,40 @@ struct Recorded {
     list_request_ids: Vec<Option<String>>,
     /// The same, for each `ResolveProject`.
     resolve_request_ids: Vec<Option<String>>,
+    /// The `grpc-timeout` each `ResolveProject` arrived with, parsed to a
+    /// `Duration`. `None` is no header at all (ADR-1019).
+    resolve_timeouts: Vec<Option<Duration>>,
+    /// The same, for each `ListProjects`.
+    list_timeouts: Vec<Option<Duration>>,
+}
+
+/// The `grpc-timeout` a store call arrived with, as a `Duration`: the value the
+/// store would bound its own work by. Parsed here from the wire form (digits and
+/// one unit letter) rather than through `yadgar-dial`, so the test does not
+/// trust the code it checks.
+fn grpc_timeout<T>(request: &Request<T>) -> Option<Duration> {
+    let raw = request.metadata().get("grpc-timeout")?.to_str().ok()?;
+    let (digits, unit) = raw.split_at(raw.len() - 1);
+    let n: u64 = digits.parse().ok()?;
+    Some(match unit {
+        "H" => Duration::from_secs(n * 3600),
+        "M" => Duration::from_secs(n * 60),
+        "S" => Duration::from_secs(n),
+        "m" => Duration::from_millis(n),
+        "u" => Duration::from_micros(n),
+        "n" => Duration::from_nanos(n),
+        other => panic!("grpc-timeout unit {other:?} in {raw:?}"),
+    })
+}
+
+/// Sets its flag when dropped: how a fake store notices that the call it was
+/// holding was cancelled.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 /// The header a store call arrived with, read the way `project-db` reads it:
@@ -123,6 +159,10 @@ fn request_id_header<T>(request: &Request<T>) -> Option<String> {
 struct MockDb {
     list: Option<Canned<pb::ListProjectsResponse>>,
     resolve: Option<Canned<pb::ResolveProjectResponse>>,
+    /// Never answers `ResolveProject` and `ListProjects`; `handler_dropped` is
+    /// set when the server drops the handler.
+    hang: bool,
+    handler_dropped: Arc<AtomicBool>,
     seen: Arc<Mutex<Recorded>>,
 }
 
@@ -157,10 +197,17 @@ impl ProjectDbService for MockDb {
         request: Request<pb::ResolveProjectRequest>,
     ) -> Result<Response<pb::ResolveProjectResponse>, Status> {
         let id = request_id_header(&request);
-        let mut seen = self.seen.lock().unwrap();
-        seen.resolve_request_ids.push(id);
-        seen.resolve.push(request.into_inner());
-        drop(seen);
+        let timeout = grpc_timeout(&request);
+        {
+            let mut seen = self.seen.lock().unwrap();
+            seen.resolve_timeouts.push(timeout);
+            seen.resolve_request_ids.push(id);
+            seen.resolve.push(request.into_inner());
+        }
+        if self.hang {
+            let _flag = DropFlag(self.handler_dropped.clone());
+            std::future::pending::<()>().await;
+        }
         answer(&self.resolve, "ResolveProject")
     }
 
@@ -176,10 +223,17 @@ impl ProjectDbService for MockDb {
         request: Request<pb::ListProjectsRequest>,
     ) -> Result<Response<pb::ListProjectsResponse>, Status> {
         let id = request_id_header(&request);
-        let mut seen = self.seen.lock().unwrap();
-        seen.list_request_ids.push(id);
-        seen.list.push(request.into_inner());
-        drop(seen);
+        let timeout = grpc_timeout(&request);
+        {
+            let mut seen = self.seen.lock().unwrap();
+            seen.list_timeouts.push(timeout);
+            seen.list_request_ids.push(id);
+            seen.list.push(request.into_inner());
+        }
+        if self.hang {
+            let _flag = DropFlag(self.handler_dropped.clone());
+            std::future::pending::<()>().await;
+        }
         answer(&self.list, "ListProjects")
     }
 
@@ -227,6 +281,15 @@ impl ProjectDbService for MockDb {
 /// nothing to reap: the runtime is dropped when the `#[tokio::test]` body
 /// returns.
 async fn wire(mock: MockDb) -> (Project, Arc<Mutex<Recorded>>) {
+    wire_with(mock, CEILING).await
+}
+
+/// The `project-db` request timeout the cases dial with (ADR-1019's ceiling).
+/// Deliberately not the chart's 30 s or the floor's 14 s, so a stamp that took
+/// either from somewhere else is caught.
+const CEILING: Duration = Duration::from_secs(20);
+
+async fn wire_with(mock: MockDb, ceiling: Duration) -> (Project, Arc<Mutex<Recorded>>) {
     let seen = mock.seen.clone();
 
     // Bind FIRST, then serve the bound listener. Picking a port and reopening it
@@ -249,7 +312,7 @@ async fn wire(mock: MockDb) -> (Project, Arc<Mutex<Recorded>>) {
         .await
         .expect("the mock store accepted the connection");
 
-    (Project::new(channel), seen)
+    (Project::new(channel, ceiling), seen)
 }
 
 async fn list_returning(
@@ -862,14 +925,25 @@ async fn a_store_not_found_reaches_the_caller_as_not_found() {
 /// reachable fails RECOVERABLY.
 #[tokio::test]
 async fn an_unreachable_store_reaches_the_caller_as_unavailable() {
-    for code in [Code::Unavailable, Code::DeadlineExceeded] {
-        let status = resolve_failing_with(code, DB_DETAIL).await;
-        assert_eq!(status.code(), Code::Unavailable);
-        assert_eq!(
-            status.message(),
-            "the project registry could not be reached in time — retry"
-        );
-    }
+    let status = resolve_failing_with(Code::Unavailable, DB_DETAIL).await;
+    assert_eq!(status.code(), Code::Unavailable);
+    assert_eq!(
+        status.message(),
+        "the project registry could not be reached in time — retry"
+    );
+}
+
+/// ADR-1019: a call that ran out of time is DEADLINE_EXCEEDED to the caller, not
+/// UNAVAILABLE. The caller set the deadline, and a client that sees
+/// UNAVAILABLE retries into a budget that is already spent.
+#[tokio::test]
+async fn a_store_deadline_exceeded_reaches_the_caller_as_deadline_exceeded() {
+    let status = resolve_failing_with(Code::DeadlineExceeded, DB_DETAIL).await;
+    assert_eq!(status.code(), Code::DeadlineExceeded);
+    assert_eq!(
+        status.message(),
+        "the project registry did not answer in time"
+    );
 }
 
 /// The store's message may name tables and columns, and a client of the public
@@ -1075,4 +1149,134 @@ async fn an_absent_request_id_records_empty_and_forwards_nothing() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.list_request_ids, vec![None]);
     assert_eq!(seen.resolve_request_ids, vec![None]);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-1019 — the caller's deadline bounds every `project-db` call.
+// ---------------------------------------------------------------------------
+
+/// The caller gave 300 ms and the store never answers. The store is told no
+/// more than 250 ms (300 less dial's 50 ms margin), `project` answers
+/// DEADLINE_EXCEEDED before the caller's 300 ms is up rather than CANCELLED or
+/// UNAVAILABLE, and the store's handler is dropped, not left running.
+#[tokio::test]
+async fn red_adr1019_resolve_gives_up_with_its_caller() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (svc, seen) = wire(MockDb {
+        hang: true,
+        handler_dropped: dropped.clone(),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = Request::new(pb::ProjectServiceResolveProjectRequest {
+        candidate_path: CALLER_CANDIDATE.into(),
+    });
+    request.set_timeout(Duration::from_millis(300));
+    let started = Instant::now();
+    // A backstop, so a handler that ignores the deadline fails the case instead
+    // of hanging the suite.
+    let status = tokio::time::timeout(Duration::from_secs(2), svc.resolve_project(request))
+        .await
+        .expect("the handler must give up on its own, not wait for the store")
+        .expect_err("the store never answers");
+
+    assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "answered after {:?}, past the caller's 300 ms",
+        started.elapsed()
+    );
+    let told = seen.lock().unwrap().resolve_timeouts.clone();
+    assert_eq!(told.len(), 1);
+    let told = told[0].expect("the store was given a grpc-timeout");
+    assert!(told <= Duration::from_millis(250), "told {told:?}");
+    // The cancel travels as RST_STREAM; give the store a moment to observe it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the store's handler was still running"
+    );
+}
+
+/// The same for the registry load, whose caller is the gateway.
+#[tokio::test]
+async fn red_adr1019_list_gives_up_with_its_caller() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (svc, seen) = wire(MockDb {
+        hang: true,
+        handler_dropped: dropped.clone(),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = Request::new(pb::ProjectServiceListProjectsRequest::default());
+    request.set_timeout(Duration::from_millis(300));
+    let started = Instant::now();
+    let status = tokio::time::timeout(
+        Duration::from_secs(2),
+        svc.list_as(Some(LIST_CALLER), request),
+    )
+    .await
+    .expect("the handler must give up on its own, not wait for the store")
+    .expect_err("the store never answers");
+
+    assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+    assert!(started.elapsed() < Duration::from_millis(300));
+    let told = seen.lock().unwrap().list_timeouts[0].expect("a grpc-timeout");
+    assert!(told <= Duration::from_millis(250), "told {told:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+/// No deadline from the caller: the store is told the ceiling the channel was
+/// dialled with, on both read verbs, and the request id still travels.
+#[tokio::test]
+async fn red_adr1019_without_a_deadline_the_store_is_told_the_ceiling() {
+    let (svc, seen) = wire(MockDb {
+        resolve: Some(Ok(pb::ResolveProjectResponse::default())),
+        list: Some(Ok(pb::ListProjectsResponse::default())),
+        ..Default::default()
+    })
+    .await;
+
+    let mut resolve = Request::new(pb::ProjectServiceResolveProjectRequest {
+        candidate_path: CALLER_CANDIDATE.into(),
+    });
+    resolve
+        .metadata_mut()
+        .insert("x-yadgar-request-id", "rid-1019".parse().unwrap());
+    svc.resolve_project(resolve).await.expect("answered");
+    svc.list_as(
+        Some(LIST_CALLER),
+        Request::new(pb::ProjectServiceListProjectsRequest::default()),
+    )
+    .await
+    .expect("answered");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.resolve_timeouts, vec![Some(CEILING)]);
+    assert_eq!(seen.list_timeouts, vec![Some(CEILING)]);
+    assert_eq!(
+        seen.resolve_request_ids,
+        vec![Some("rid-1019".to_string())],
+        "stamping the timeout must not drop the request id"
+    );
+}
+
+/// A caller deadline longer than the ceiling is capped to the ceiling: the
+/// chart value is a ceiling, never raised.
+#[tokio::test]
+async fn red_adr1019_a_long_caller_deadline_is_capped_at_the_ceiling() {
+    let (svc, seen) = wire(MockDb {
+        resolve: Some(Ok(pb::ResolveProjectResponse::default())),
+        ..Default::default()
+    })
+    .await;
+    let mut request = Request::new(pb::ProjectServiceResolveProjectRequest {
+        candidate_path: CALLER_CANDIDATE.into(),
+    });
+    request.set_timeout(Duration::from_secs(120));
+    svc.resolve_project(request).await.expect("answered");
+    assert_eq!(seen.lock().unwrap().resolve_timeouts, vec![Some(CEILING)]);
 }

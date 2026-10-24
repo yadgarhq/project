@@ -222,6 +222,7 @@ pub async fn serve_until_drained(
     mut server: Server,
     tls: Option<ServerTls>,
     channel: Channel,
+    request_timeout: std::time::Duration,
     watch_inputs: Inputs,
     schedule: Schedule,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -273,7 +274,10 @@ pub async fn serve_until_drained(
     let (ask_to_stop, stop_requested) = tokio::sync::oneshot::channel();
     let serving = tokio::spawn(
         server
-            .add_service(ProjectServiceServer::new(Project::new(channel)))
+            .add_service(ProjectServiceServer::new(Project::new(
+                channel,
+                request_timeout,
+            )))
             .serve_with_shutdown(addr, async {
                 let _ = stop_requested.await;
             }),

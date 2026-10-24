@@ -189,7 +189,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "connected to project-db"
     );
 
-    boot::serve_until_drained(server, tls, channel, watch_inputs, schedule).await
+    boot::serve_until_drained(
+        server,
+        tls,
+        channel,
+        request_timeout,
+        watch_inputs,
+        schedule,
+    )
+    .await
 }
 
 #[cfg(test)]
