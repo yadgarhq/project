@@ -1,8 +1,13 @@
 //! THE EXIT CHAIN, held at the binary (ledger 748): the two ways a running
 //! `project` is asked to stop both end the process with exit code 0. What this
 //! file does NOT see is in-flight calls finishing: replacing `drain_within` with
-//! `serving.abort()` keeps both cases green. The drain itself is held by
-//! `yadgar-lifecycle`'s `tests/shutdown.rs`.
+//! `serving.abort()` keeps both cases green.
+//!
+//! **IN-FLIGHT CANARY.** The one binary test that holds a call across SIGTERM
+//! and asserts the caller gets its answer is `yadgarhq/task`'s
+//! `sigterm_lets_an_in_flight_call_finish` (task#87, merged; yaadgaar #318).
+//! It is the single canary. The drain is the same `yadgar-lifecycle` code in
+//! every binary, so this repository does not copy the case.
 //!
 //! The library tests prove the parts — `yadgar-lifecycle` that a signal resolves
 //! `shutdown()` and that a changed file resolves `rotate::watch`,

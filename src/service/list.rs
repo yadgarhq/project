@@ -6,6 +6,7 @@
 //! [`Project::list_as`].
 
 use tonic::{Request, Response, Status};
+use yadgar_dial::Deadline;
 use yadgar_telemetry::estimator::Class;
 use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
@@ -56,6 +57,8 @@ impl Project {
             tel_scope_joined(None, request_id_of(&request)),
         );
         let request_id = request_id_of(&request);
+        // READ BEFORE THE REQUEST IS CONSUMED, as the request id is (ADR-1019).
+        let deadline = Deadline::of(&request);
         let req = request.into_inner();
 
         call.run(
@@ -64,34 +67,34 @@ impl Project {
                 // and BEFORE the relay, so a refused call never reaches the
                 // store.
                 admit(caller)?;
-                let listed = self
-                    .db
-                    .clone()
-                    .list_projects(carrying(
-                        pb::ListProjectsRequest {
-                            // NO `Scope`: this tier holds none on this rpc, and
-                            // `project-db`'s reads accept its absence (ledger 762).
-                            scope: None,
-                            // THE WHOLE REGISTRY, NEVER A SLICE. `under_path` is the
-                            // only field that could narrow it, and the caller of
-                            // this rpc is loading the set it will resolve every
-                            // future candidate against — a subtree would answer some
-                            // of them wrongly and none of them detectably.
-                            under_path: String::new(),
-                            // NOT FILTERED BY STATUS, AND IT MUST NOT BE.
-                            // `RegisteredPath`'s own comment: the store's resolution
-                            // walks live paths and aliases without consulting status
-                            // and reports the status it found, so a caller that
-                            // dropped archived rows from its own walk would resolve
-                            // a candidate to a different ancestor than
-                            // `ResolveProject` resolves it to — two answers for one
-                            // path, differing only in which route the caller took.
-                            status: None,
-                            page_size: req.page_size,
-                            page_token: req.page_token,
-                        },
-                        &request_id,
-                    ))
+                let store = carrying(
+                    pb::ListProjectsRequest {
+                        // NO `Scope`: this tier holds none on this rpc, and
+                        // `project-db`'s reads accept its absence (ledger 762).
+                        scope: None,
+                        // THE WHOLE REGISTRY, NEVER A SLICE. `under_path` is the
+                        // only field that could narrow it, and the caller of
+                        // this rpc is loading the set it will resolve every
+                        // future candidate against — a subtree would answer some
+                        // of them wrongly and none of them detectably.
+                        under_path: String::new(),
+                        // NOT FILTERED BY STATUS, AND IT MUST NOT BE.
+                        // `RegisteredPath`'s own comment: the store's resolution
+                        // walks live paths and aliases without consulting status
+                        // and reports the status it found, so a caller that
+                        // dropped archived rows from its own walk would resolve
+                        // a candidate to a different ancestor than
+                        // `ResolveProject` resolves it to — two answers for one
+                        // path, differing only in which route the caller took.
+                        status: None,
+                        page_size: req.page_size,
+                        page_token: req.page_token,
+                    },
+                    &request_id,
+                );
+                let mut db = self.db.clone();
+                let listed = deadline
+                    .call(self.ceiling, store, |r| db.list_projects(r))
                     .await
                     .map_err(|e| passthrough(e, "list"))?
                     .into_inner();
@@ -135,7 +138,7 @@ impl Project {
 
 /// One stored row as the load reports it.
 ///
-/// **FOUR FIELDS, AND THE FOURTH COMES FROM `Meta`.** `display_name`,
+/// **FIVE FIELDS; THE FOURTH COMES FROM `Meta`, THE FIFTH IS THE ROW'S GRANTS.** `display_name`,
 /// `last_seen_at` and the rest of `Meta` are not on `RegisteredPath` and are not
 /// put on the wire: this rpc answers what resolves and who owns a private row,
 /// not what a project is.
@@ -165,6 +168,11 @@ fn registered(project: pb::Project) -> pb::RegisteredPath {
             .meta
             .map(|meta| meta.owner_user_id)
             .unwrap_or_default(),
+        // THE ROW'S OWN TEAM GRANTS, AS THE STORE HOLDS THEM (team access
+        // stage 5, ADR-0962). Never inherited here: the gateway computes
+        // inheritance from the whole load. Relayed on a private row too, where
+        // the store holds none and the gateway ignores any (a store defect).
+        grants: project.grants,
     }
 }
 

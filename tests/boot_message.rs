@@ -16,9 +16,8 @@ mod support;
 
 use std::net::TcpListener;
 use std::process::Command;
-use std::time::Duration;
 
-use support::{cleartext_env, run_to_exit, Booted, BIN};
+use support::{cleartext_env, listener_limits, run_to_exit, Booted, BIN, MARGIN};
 
 /// The `Error: ` line from a refused boot, held to plain Display.
 fn refusal_line(status: std::process::ExitStatus, stderr: &str) -> String {
@@ -135,12 +134,15 @@ fn an_unusable_listener_identity_names_the_reason_at_the_real_boot_path() {
     std::fs::write(&key, other_key_pem).unwrap();
     let (cert, key) = (cert.display().to_string(), key.display().to_string());
 
-    let line = refusal_without_mounts(&[
+    let mut vars = vec![
         ("LISTEN_TLS_ENABLED", "1"),
         ("LISTEN_TLS_CLIENT_AUTH", "off"),
         ("LISTEN_TLS_CERT_FILE", cert.as_str()),
         ("LISTEN_TLS_KEY_FILE", key.as_str()),
-    ]);
+    ];
+    // The limits are read before the server is built from them (ADR-1006).
+    vars.extend(listener_limits());
+    let line = refusal_without_mounts(&vars);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         line.contains("keys may not be consistent"),
@@ -208,28 +210,19 @@ fn an_unparsable_metrics_listen_names_the_variable() {
 /// see this — it only validates TLS, never binds — so the refusal has to come
 /// from the server's own bind, inside the task `serve_until_drained` spawns.
 ///
-/// **THAT TASK'S FAILURE IS INVISIBLE UNTIL SOMETHING ASKS THE PROCESS TO
-/// STOP.** `yadgar_lifecycle::drain_within` awaits `stop` FIRST and only then
-/// joins the spawned server — see its own doc comment — so a bind that fails
-/// before any signal arrives leaves the process running (silently, having
-/// bound nothing) rather than exiting (ledger 1334 tracks the fix, in
-/// `yadgar-lifecycle`: `drain_within` should `select!` on the server
-/// alongside `stop`, not await `stop` alone).
+/// **THE PROCESS MUST EXIT NON-ZERO ON ITS OWN** (yaadgaar #313).
+/// `yadgar_lifecycle::drain_within` returns `Drain::Finished(Err(..))` the
+/// moment the serving task ends, so a failed bind exits through the same arm as
+/// any other server error. This test sends no SIGTERM: a process that waits for
+/// one has not failed, it is idling with nothing bound.
 ///
 /// **TWO REAL MISCONFIGURATIONS PRODUCE THIS, and the chart catches neither
 /// automatically.** A port already held by another container in THIS SAME
 /// POD (pods never share a network namespace with each other, so this is
 /// never a cross-pod collision) leaves the `tcpSocket` readinessProbe on
-/// `grpc` passing against that OTHER container — this is the case below, and
-/// the pod is Ready while this service answers nothing. An address this host
-/// cannot use (`EADDRNOTAVAIL`) or cannot bind (`EACCES`) instead fails that
-/// same probe, so the pod is NotReady forever. There is no `livenessProbe` in
-/// this chart ("failing readiness never kills a pod",
-/// `chart/templates/deployment.yaml`), so NEITHER case ever gets the SIGTERM
-/// that would surface this error — an operator or a rollout has to notice and
-/// replace the pod by hand. This test supplies that missing SIGTERM itself,
-/// after giving the bind attempt — synchronous, effectively instant — time to
-/// fail.
+/// `grpc` passing against that OTHER container. An address this host cannot use
+/// (`EADDRNOTAVAIL`) or cannot bind (`EACCES`) fails that same probe. Either
+/// way the exit is what makes the rollout stall instead of serving nothing.
 ///
 /// Held in-process rather than by a second `unshare` child: the listener and
 /// the binary under test must share one network namespace for the collision
@@ -249,18 +242,19 @@ fn a_bind_failure_names_the_listen_address() {
     vars.push(("LISTEN", listen.as_str()));
 
     let mut project = Booted::start(&vars);
-    // Fires regardless of whether the real bind that follows succeeds — see
-    // `serve_until_drained`, which logs it before spawning the server task.
     project.wait_until_listening();
-    // The bind itself is a single synchronous syscall; this is slack for the
-    // scheduler to have polled the spawned task at least once, not a wait for
-    // anything slow.
-    std::thread::sleep(Duration::from_millis(200));
-    project.terminate();
-    let status = project.wait_for_exit(
-        "after SIGTERM surfaced the bind failure",
-        Duration::from_secs(10),
+    // No `terminate()`: the process has to end by itself. The refusal line is
+    // the proof it noticed the failed bind, and it must arrive within 5 s.
+    project.wait_for_line(
+        "the bind failure's refusal, with no SIGTERM sent",
+        MARGIN,
+        |l| l.starts_with("Error: "),
     );
+    // The exit follows the line. `MARGIN` is the harness's own slack for a
+    // process in its own mount namespace, whose reaping waits on the kernel's
+    // namespace teardown (one CI run took over 5 s). It only has to tell an
+    // exit from the idle-forever bug.
+    let status = project.wait_for_exit("on its own after the bind failed", MARGIN);
     let seen = project.seen().join("\n");
     drop(holder);
 
@@ -275,6 +269,50 @@ fn a_bind_failure_names_the_listen_address() {
         line.contains("Address already in use"),
         "the refusal must carry the OS reason, not just tonic's own `transport error`: {line}"
     );
+}
+
+/// ADR-1006: each of the four listener limits is REQUIRED, with no compiled-in
+/// default (ADR-0569). An absent, non-numeric or out-of-range value refuses the
+/// boot, naming the variable AND the chart value that renders it. Read before
+/// `shared.yaml`, so no mount namespace.
+#[test]
+fn a_missing_or_bad_listener_limit_names_the_variable_and_the_chart_key() {
+    let keys = [
+        (
+            "LISTEN_MAX_CONCURRENT_STREAMS",
+            "server.limits.maxConcurrentStreams",
+        ),
+        (
+            "LISTEN_KEEPALIVE_INTERVAL_SECS",
+            "server.limits.keepaliveIntervalSeconds",
+        ),
+        (
+            "LISTEN_KEEPALIVE_TIMEOUT_SECS",
+            "server.limits.keepaliveTimeoutSeconds",
+        ),
+        (
+            "LISTEN_MAX_HEADER_LIST_BYTES",
+            "server.limits.maxHeaderListBytes",
+        ),
+    ];
+    for (var, chart) in keys {
+        for bad in [None, Some("abc"), Some("0")] {
+            let mut vars = cleartext_env();
+            vars.retain(|(k, _)| *k != var);
+            if let Some(value) = bad {
+                vars.push((var, value));
+            }
+            let line = refusal_without_mounts(&vars);
+            assert!(
+                line.contains(var),
+                "{var}={bad:?}: the refusal must name the variable: {line}"
+            );
+            assert!(
+                line.contains(chart),
+                "{var}={bad:?}: the refusal must name the chart key {chart}: {line}"
+            );
+        }
+    }
 }
 
 /// ADR-0925 Q-C1: `PROJECT_DB_REQUEST_TIMEOUT_SECONDS` has no compiled-in default, so

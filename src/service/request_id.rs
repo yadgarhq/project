@@ -47,7 +47,7 @@ fn capped(s: &str) -> std::borrow::Cow<'_, str> {
 /// the request is consumed: `into_inner` drops the metadata.
 ///
 /// Capped rather than refused, and an absent or unreadable value is `""`,
-/// because a correlation id must never fail a call (D25).
+/// because a correlation id must never fail a call (D67).
 pub(super) fn request_id_of<T>(req: &Request<T>) -> String {
     req.metadata()
         .get(REQUEST_ID_HEADER)
@@ -62,7 +62,7 @@ pub(super) fn request_id_of<T>(req: &Request<T>) -> String {
 /// `request_id` is the id ALREADY ON this call's record — capped, so the wire is
 /// bounded and carries the same string. An empty id forwards NO header rather
 /// than an empty one, which `project-db` reads exactly as it reads none. A value
-/// that cannot be a header is dropped, never an error (D25); it cannot happen,
+/// that cannot be a header is dropped, never an error (D67); it cannot happen,
 /// since `to_str()` admitted the inbound value and the marker is ASCII.
 pub(super) fn carrying<T>(message: T, request_id: &str) -> Request<T> {
     let mut req = Request::new(message);

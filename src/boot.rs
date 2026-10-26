@@ -31,7 +31,7 @@ use tonic::transport::{Channel, Server};
 use yadgar_lifecycle::{drain_within, shutdown, Drain, DRAIN_BUDGET};
 use yadgar_project::pb::yadgar::project::v1::project_service_server::ProjectServiceServer;
 use yadgar_project::rotate::{self, Inputs, Schedule};
-use yadgar_project::serve::{self, ServerTls, LISTEN};
+use yadgar_project::serve::{self, ServerLimits, ServerTls, LISTEN};
 use yadgar_project::service::Project;
 use yadgar_project::upstream::{self, UpstreamTls, PROJECT_DB};
 
@@ -107,7 +107,14 @@ pub fn prepare() -> Result<Prepared, Box<dyn std::error::Error>> {
     // what reaches `keys may not be consistent`. `from_env`'s refusals carry
     // no source, so the walk prints exactly their sentence.
     let tls = ServerTls::from_env(LISTEN, serve::CHART_KEY).map_err(|e| crate::refusal(&e))?;
-    let server = serve::builder(tls.as_ref()).map_err(|e| crate::refusal(&e))?;
+    // THE FIVE PROTOCOL LIMITS (ADR-1006): required, no default here (ADR-0569).
+    // The chart supplies them; an absent, non-numeric or out-of-range value
+    // refuses the boot naming the variable and `server.limits.<leaf>`. Read
+    // beside the TLS inputs and BEFORE the server is built, because the server
+    // is built from them.
+    let limits =
+        ServerLimits::from_env(LISTEN, serve::LIMITS_CHART_KEY).map_err(|e| crate::refusal(&e))?;
+    let server = serve::builder(tls.as_ref(), &limits).map_err(|e| crate::refusal(&e))?;
 
     // The HEADLESS Service name (D23). Resolving it yields every ready pod
     // address rather than one virtual IP.
@@ -215,13 +222,14 @@ pub async fn serve_until_drained(
     mut server: Server,
     tls: Option<ServerTls>,
     channel: Channel,
+    request_timeout: std::time::Duration,
     watch_inputs: Inputs,
     schedule: Schedule,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The BINARY installs the exporter, never the library — a library that
     // installs one picks the backend for every service linking it. A failure here
     // is logged and ignored: a service that cannot export metrics should still
-    // serve traffic, which is D25's rule applied to the metrics path too.
+    // serve traffic, which is D67's rule applied to the metrics path too.
     // Named on the way out, for the reason given on PROJECT_DB_PORT above.
     let metrics_addr: SocketAddr = env_required("METRICS_LISTEN")?
         .parse()
@@ -266,7 +274,10 @@ pub async fn serve_until_drained(
     let (ask_to_stop, stop_requested) = tokio::sync::oneshot::channel();
     let serving = tokio::spawn(
         server
-            .add_service(ProjectServiceServer::new(Project::new(channel)))
+            .add_service(ProjectServiceServer::new(Project::new(
+                channel,
+                request_timeout,
+            )))
             .serve_with_shutdown(addr, async {
                 let _ = stop_requested.await;
             }),

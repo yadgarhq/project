@@ -188,9 +188,11 @@ A permanent gap — an unusable CA bundle, a missing client certificate, a host
 that is not a URI authority — still fails boot. A transient absence dials lazily.
 
 `passthrough` in `src/service.rs` is where the contract is kept: a `-db`
-answering `UNAVAILABLE` or `DEADLINE_EXCEEDED` reaches the caller as
-`UNAVAILABLE`, and `NOT_FOUND` reaches it as `NOT_FOUND` — one condition
-carrying one code across both tiers, which is what the contract asks for. The
+answering `UNAVAILABLE` reaches the caller as `UNAVAILABLE`, `DEADLINE_EXCEEDED`
+as `DEADLINE_EXCEEDED` (ADR-1019: the caller's deadline bounds every `-db` call,
+and a spent budget must not read as a retryable outage), and `NOT_FOUND` as
+`NOT_FOUND` — one condition carrying one code across both tiers, which is what
+the contract asks for. The
 store's MESSAGE never reaches a caller: it may name tables and columns.
 
 ## SIGTERM, not SIGINT
@@ -259,22 +261,26 @@ cargo test     # they need no engine and no -db
 
 ## Configuration
 
-| variable                              | required? — and what the chart renders                           | what it is                                                                     |
-| ------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `PROJECT_DB_HOST` / `PROJECT_DB_PORT` | required — from `projectDb.host` / `projectDb.port`              | the twin's headless Service                                                    |
-| `LISTEN`                              | required — `0.0.0.0:50052`, matching the chart's `containerPort` | the gRPC address this service binds                                            |
-| `METRICS_LISTEN`                      | required — `0.0.0.0:9090`                                        | the Prometheus endpoint (D67)                                                  |
-| `RUST_LOG`                            | the binary falls back to `info` (an argued ADR-0569 exception)   | a DEFAULT, not `from_default_env`'s silence                                    |
-| `LISTEN_TLS_ENABLED`                  | required, no default — from `tls.enabled` (ADR-0845)             | exactly `1` (TLS) or `0` (cleartext); absent or anything else refuses the boot |
-| `LISTEN_TLS_CLIENT_AUTH`              | required, no default — from `tls.clientAuth`, even with TLS off  | exactly `off`, `optional` or `required`: whether callers are verified          |
-| `LISTEN_TLS_CERT_FILE`                | unset                                                            | PEM certificate this service PRESENTS                                          |
-| `LISTEN_TLS_KEY_FILE`                 | unset                                                            | its private key                                                                |
-| `LISTEN_TLS_CLIENT_CA_FILE`           | from `tls.clientCaSecret`; required by `optional` / `required`   | PEM bundle CALLERS are verified against (`yadgar_lifecycle::serve_tls`)        |
-| `PROJECT_DB_TLS_ENABLED`              | unset                                                            | exactly `1` to dial `project-db` over TLS                                      |
-| `PROJECT_DB_TLS_CA_FILE`              | unset                                                            | PEM bundle `project-db` is VERIFIED against                                    |
-| `PROJECT_DB_TLS_DOMAIN`               | unset                                                            | only when the certificate names something else                                 |
-| `PROJECT_DB_TLS_CLIENT_CERT_FILE`     | unset                                                            | the certificate this service PRESENTS to `project-db` — mutual TLS (ADR-0516)  |
-| `PROJECT_DB_TLS_CLIENT_KEY_FILE`      | unset                                                            | its private key. Both or neither: half an identity is refused at boot          |
+| variable                              | required? — and what the chart renders                                           | what it is                                                                     |
+| ------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `PROJECT_DB_HOST` / `PROJECT_DB_PORT` | required — from `projectDb.host` / `projectDb.port`                              | the twin's headless Service                                                    |
+| `LISTEN`                              | required — `0.0.0.0:50052`, matching the chart's `containerPort`                 | the gRPC address this service binds                                            |
+| `METRICS_LISTEN`                      | required — `0.0.0.0:9090`                                                        | the Prometheus endpoint (D67)                                                  |
+| `RUST_LOG`                            | the binary falls back to `info` (an argued ADR-0569 exception)                   | a DEFAULT, not `from_default_env`'s silence                                    |
+| `LISTEN_TLS_ENABLED`                  | required, no default — from `tls.enabled` (ADR-0845)                             | exactly `1` (TLS) or `0` (cleartext); absent or anything else refuses the boot |
+| `LISTEN_TLS_CLIENT_AUTH`              | required, no default — from `tls.clientAuth`, even with TLS off                  | exactly `off`, `optional` or `required`: whether callers are verified          |
+| `LISTEN_TLS_CERT_FILE`                | unset                                                                            | PEM certificate this service PRESENTS                                          |
+| `LISTEN_TLS_KEY_FILE`                 | unset                                                                            | its private key                                                                |
+| `LISTEN_TLS_CLIENT_CA_FILE`           | from `tls.clientCaSecret`; required by `optional` / `required`                   | PEM bundle CALLERS are verified against (`yadgar_lifecycle::serve_tls`)        |
+| `LISTEN_MAX_CONCURRENT_STREAMS`       | required, no default — from `server.limits.maxConcurrentStreams` (256, ADR-1006) | most concurrent streams one connection may open; 1..=10000                     |
+| `LISTEN_KEEPALIVE_INTERVAL_SECS`      | required, no default — from `server.limits.keepaliveIntervalSeconds` (30)        | how often an idle connection is PINGed; 1..=3600                               |
+| `LISTEN_KEEPALIVE_TIMEOUT_SECS`       | required, no default — from `server.limits.keepaliveTimeoutSeconds` (10)         | how long a PING may go unanswered; 1..=600 and below the interval              |
+| `LISTEN_MAX_HEADER_LIST_BYTES`        | required, no default — from `server.limits.maxHeaderListBytes` (16384)           | the largest request header list; 1024..=1048576                                |
+| `PROJECT_DB_TLS_ENABLED`              | unset                                                                            | exactly `1` to dial `project-db` over TLS                                      |
+| `PROJECT_DB_TLS_CA_FILE`              | unset                                                                            | PEM bundle `project-db` is VERIFIED against                                    |
+| `PROJECT_DB_TLS_DOMAIN`               | unset                                                                            | only when the certificate names something else                                 |
+| `PROJECT_DB_TLS_CLIENT_CERT_FILE`     | unset                                                                            | the certificate this service PRESENTS to `project-db` — mutual TLS (ADR-0516)  |
+| `PROJECT_DB_TLS_CLIENT_KEY_FILE`      | unset                                                                            | its private key. Both or neither: half an identity is refused at boot          |
 
 The rotation schedule is NOT an environment variable. It is read from
 `yadgarhq/config`'s `shared.yaml` (`tlsRotation.pollSeconds` /
