@@ -53,7 +53,7 @@ repos:
     # repository's only direct boot read left `src/` with the local
     # `ServeTls`, so the older gate judged zero reads and refused, while the
     # files are still read — and watched — by `yadgar_lifecycle::serve_tls`.
-    rev: v1.37.0
+    rev: v1.37.1
     hooks:
       - id: gitleaks
       - id: prettier
