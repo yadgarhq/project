@@ -250,6 +250,12 @@ member turns a test red, and `tests/exit_chain.rs` now runs the binary itself
 (ledger 748). That assembly test shipped in this module's first commit rather than
 arriving in a later sweep.
 
+## Installing
+
+Install project from the published OCI chart: `helm install project oci://ghcr.io/yadgarhq/charts/project --version <version>`. The release pins that chart to the image digest.
+
+A checkout of `chart/` renders `image.tag: latest`, a moving tag. Use a checkout for development only.
+
 ## Local development
 
 ```bash
