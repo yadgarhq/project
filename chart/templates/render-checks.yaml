@@ -330,8 +330,7 @@ missing key reads as nil here and is refused too.
 
 LEFT ALONE ON PURPOSE. `autoscaling.threshold` is rendered quoted and KEDA reads the
 exponent form as a float64. `rollingUpdate.*` is an open map written with `toYaml` that
-takes an int or a percentage string. `projectDb.requestTimeoutSeconds` and `server.limits.*`
-are bounded by `values.schema.json` far below 1e6, and `server.limits.*` is already cast.
+takes an int or a percentage string. `projectDb.requestTimeoutSeconds` is bounded 14..59 by `values.schema.json`, and `server.limits.*` is already cast through `int64`.
 `autoscaling.enabled` is a confirmed bool by the blocks above.
 */}}
 {{- $checks := list
