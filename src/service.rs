@@ -306,7 +306,9 @@ impl ProjectService for Project {
             "project",
             "SyncProjects",
             Kind::Write,
-            tel_scope(req.scope.as_ref()),
+            // THE CLAIMED SCOPE ONLY WHEN `admit` WOULD PASS (yaadgaar 204):
+            // a refused call records no identity it did not prove.
+            sync::recorded_scope(caller.as_deref(), req.scope.as_ref()),
         );
 
         call.run(

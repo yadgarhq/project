@@ -520,6 +520,59 @@ async fn the_seeder_s_leaf_reaches_the_store_and_its_counts_come_back_unchanged(
     );
 }
 
+/// Captures every `CallRecord` line `yadgar_telemetry::record::emit` writes,
+/// for as long as the guard `record::set_sink` hands back lives. The same
+/// capture as `tests/service.rs`'s.
+#[derive(Clone, Default)]
+struct RecordCapture(Arc<Mutex<Vec<String>>>);
+
+impl yadgar_telemetry::record::Sink for RecordCapture {
+    fn write_record(&self, line: &str) -> std::io::Result<()> {
+        self.0.lock().expect("the capture").push(line.to_string());
+        Ok(())
+    }
+}
+
+/// **AN ADMITTED SYNC IS RECORDED UNDER THE SEEDER'S PRINCIPAL (yaadgaar 204).**
+/// Over a real handshake, so the handler hands the helper the caller it read
+/// off the verified leaf. A refused call records no identity; this is the other
+/// half, which a handler passing the wrong caller would lose silently.
+///
+/// The sink is THREAD-scoped. `#[tokio::test]` runs one thread, and the served
+/// handler runs on it, so its record lands in this capture.
+///
+/// **THE MUTATION THAT REDS IT:** pass `None` as the caller to
+/// `recorded_scope` in the handler.
+#[tokio::test]
+async fn an_admitted_sync_is_recorded_under_the_seeder_s_principal() {
+    let store = FakeStore::answering(Ok(store_counts()));
+    let pki = Pki::new();
+    let (port, _files) = serve_project(&pki, project_over(&store).await).await;
+    let mut client = client_as(port, &pki, pki.client(SYNC_CALLER)).await;
+
+    let records = RecordCapture::default();
+    {
+        let _sink = yadgar_telemetry::record::set_sink(Arc::new(records.clone()));
+        client
+            .sync_projects(a_declaration(SEEDER_PRINCIPAL))
+            .await
+            .expect("the seeder is admitted");
+    }
+
+    let lines = records.0.lock().expect("the capture").clone();
+    let syncs: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains(r#""tool":"SyncProjects""#))
+        .collect();
+    assert_eq!(syncs.len(), 1, "exactly one SyncProjects record: {lines:?}");
+    assert!(
+        syncs[0].contains(r#""user_id":"yadgar:system:seeder""#),
+        "{}",
+        syncs[0]
+    );
+    assert!(syncs[0].contains(r#""outcome":"OK""#), "{}", syncs[0]);
+}
+
 // ---------------------------------------------------------------------------
 // Plan cases 2 and 6 — every other verifying leaf is refused before the relay.
 // ---------------------------------------------------------------------------

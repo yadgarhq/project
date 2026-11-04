@@ -142,9 +142,42 @@ fn admit(caller: Option<&str>, scope: Option<&Scope>) -> Result<(), Status> {
     Ok(())
 }
 
-/// A store refusal on `SyncProjects`, relayed with its CODE AND ITS MESSAGE
-/// unchanged — unlike `super::passthrough`, which withholds the message on the two
-/// read verbs.
+/// The Scope D67 records for a `SyncProjects` call (yaadgaar 204).
+///
+/// **ONLY AN ADMITTED CALL'S IDENTITY IS RECORDED.** The `Call` starts before
+/// [`admit`] runs, so a refusal is recorded too. On a refused call every
+/// identity field in the Scope is an unverified claim: a record carrying it
+/// would attribute the refusal to the principal the caller named — the seeder's
+/// own, in the forgery that matters. So a refused call records `user_id`,
+/// `instance_id` and `project_id` empty, and keeps `request_id`, which is
+/// D67's join key and not an identity claim.
+///
+/// **THE SAME [`admit`] DECIDES BOTH.** This helper calls it rather than
+/// copying its checks, so what is recorded cannot drift from who is admitted.
+/// It decides only what is recorded; [`Project::sync_as`] still refuses.
+pub(super) fn recorded_scope(
+    caller: Option<&str>,
+    scope: Option<&Scope>,
+) -> yadgar_telemetry::observe::Scope {
+    let claimed = super::tel_scope(scope);
+    if admit(caller, scope).is_ok() {
+        return claimed;
+    }
+    yadgar_telemetry::observe::Scope {
+        request_id: claimed.request_id,
+        ..Default::default()
+    }
+}
+
+/// A `project-db` call's failure on `SyncProjects`, relayed with its CODE AND
+/// ITS MESSAGE unchanged — unlike `super::passthrough`, which withholds the
+/// message on the two read verbs.
+///
+/// **EVERY CLIENT `Status`, NOT ONLY THE STORE'S OWN REFUSALS.** The store's
+/// refusals are the case this exists for, but the client call also fails with
+/// a transport error (the store unreachable) and with `Deadline::call`'s own
+/// `DEADLINE_EXCEEDED`, and those are relayed the same way. Their messages come
+/// from tonic and `yadgar_dial`, not from the store.
 ///
 /// **THE CONTRACT SAYS SO, AND THE CALLER IS WHY.** `ProjectService.SyncProjects`
 /// relays the store's refusals "with their code and message unchanged". The
