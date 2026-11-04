@@ -21,6 +21,7 @@ Run: python3 -m pytest scripts/tests/ -q
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -221,9 +222,9 @@ def test_the_threshold_is_left_alone(tmp_path):
 
 
 def test_a_max_skew_is_bounded_where_a_float_prints_plainly_and_both_ends_are_exact(tmp_path):
-    """Not cast through `int64`: the chart-baseline gate prices the topology spread and
-    cannot read it through a cast. 999999 is the largest value helm prints without an
-    exponent."""
+    """Cast through `int64` and still bounded, by choice (yaadgaar 550). The API needs
+    maxSkew > 0, so 0 is refused; 999999 is the largest value helm prints without an
+    exponent, kept as the ceiling."""
     assert "maxSkew: 1\n" in rendered(overlay("topologySpread.maxSkew", 1), tmp_path)
     stdout = rendered(overlay("topologySpread.maxSkew", 999999), tmp_path)
     assert "maxSkew: 999999\n" in stdout and "e+" not in stdout.split("maxSkew:")[1].split("\n")[0]
@@ -252,9 +253,43 @@ def test_a_zero_timing_knob_still_means_not_rendered(tmp_path):
     assert "lifecycle" not in container
 
 
+DEPLOYMENT = CHART / "templates" / "deployment.yaml"
+# (any line that renders the key, the one form that line must take). Both are anchored
+# to a whole line with re.M, so a copy in a comment or a trailing comment does not count.
+CAST_SITES = {
+    "grace": (
+        r"^\s*terminationGracePeriodSeconds: \{\{.*$",
+        r"^\s*terminationGracePeriodSeconds: \{\{ \. \| int64 \}\}$",
+    ),
+    "preStop": (
+        r"^\s*seconds: \{\{.*$",
+        r"^\s*seconds: \{\{ \. \| int64 \}\}$",
+    ),
+    "maxSkew": (
+        r"^\s*- maxSkew: \{\{.*$",
+        r"^\s*- maxSkew: \{\{ \.Values\.topologySpread\.maxSkew \| int64 \}\}$",
+    ),
+}
+
+
+@pytest.mark.parametrize("site", CAST_SITES)
+def test_the_grace_period_pre_stop_sleep_and_skew_render_through_int64(site):
+    """Cast, like every other numeric knob (yaadgaar 550). The chart-baseline gate reads
+    `| int64` since actions v1.64.0, so the cast no longer costs the gate its view of the
+    value. `| int` is not the same cast and does not count. Every value the check in
+    render-checks.yaml admits renders the same bytes with or without the cast, so this
+    pin is the test that holds the cast in place. Mirrors yadgarhq/iam#172."""
+    any_render, cast = CAST_SITES[site]
+    text = DEPLOYMENT.read_text()
+    renders = re.findall(any_render, text, re.M)
+    assert len(renders) == 1, f"{site}: expected one render line in deployment.yaml, found {renders!r}"
+    assert re.fullmatch(cast, renders[0]), f"{site}: {renders[0].strip()!r} is not cast through int64"
+
+
 def test_the_grace_period_and_pre_stop_sleep_are_bounded_where_a_float_prints_plainly(tmp_path):
-    """Not cast through `int64`: the chart-baseline gate cannot price either through it.
-    999999 is the largest value helm prints without an exponent."""
+    """Cast through `int64` and still bounded at 999999, by choice (yaadgaar 550): the
+    gate no longer forces the bound, and lifting it is a separate decision. The
+    whole-number check runs BEFORE the cast, because `int64` turns 1.5 into 1."""
     assert spec(rendered(overlay("terminationGracePeriodSeconds", 999999), tmp_path))["terminationGracePeriodSeconds"] == 999999
     assert "seconds: 999999\n" in rendered(overlay("preStopSleepSeconds", 999999), tmp_path)
     for key in ("terminationGracePeriodSeconds", "preStopSleepSeconds"):
