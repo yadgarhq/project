@@ -740,6 +740,45 @@ async fn a_refused_list_is_recorded_as_permission_denied() {
     assert!(carries(&record, GATEWAY_REQUEST_ID), "{record}");
 }
 
+/// The `request_id` a refused `SyncProjects` claims. Kept on the record: it is
+/// D67's join key, not an identity claim.
+const CLAIMED_SYNC_REQUEST_ID: &str = "01a1640c-dae2-776e-a-refused-sync";
+
+/// **A REFUSED `SyncProjects` RECORDS NO CLAIMED IDENTITY (yaadgaar 204).** A
+/// direct handler call has no peer chain, so it is refused — while its Scope
+/// claims the seeder's own principal, the forgery that matters. Before the fix
+/// the record carried that claim as `user_id`, so D67 attributed a refused call
+/// to the seeder. The record keeps the refusal and the `request_id`, and
+/// carries empty `user_id`, `instance_id` and `project_id`.
+///
+/// **THE MUTATION THAT REDS IT:** start the `Call` with the claimed Scope
+/// (`tel_scope(req.scope.as_ref())`) again.
+#[tokio::test]
+async fn a_refused_sync_records_no_claimed_principal() {
+    let (svc, _) = wire(MockDb::default()).await;
+
+    let record = the_call_record(svc.sync_projects(Request::new(
+        pb::ProjectServiceSyncProjectsRequest {
+            scope: Some(common::Scope {
+                request_id: CLAIMED_SYNC_REQUEST_ID.into(),
+                user_id: "yadgar:system:seeder".into(),
+                instance_id: "a-claimed-instance".into(),
+                project_id: "a/claimed-project".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )))
+    .await;
+
+    assert!(record.contains("PERMISSION_DENIED"), "{record}");
+    assert!(carries(&record, CLAIMED_SYNC_REQUEST_ID), "{record}");
+    assert!(!record.contains("yadgar:system:seeder"), "{record}");
+    assert!(record.contains(r#""user_id":"""#), "{record}");
+    assert!(record.contains(r#""instance_id":"""#), "{record}");
+    assert!(record.contains(r#""project_id":"""#), "{record}");
+}
+
 /// Pinned by LITERAL (ADR-0599): `gateway-caller` is the common name
 /// `platform` writes on the gateway's client leaf (`chart/values.yaml`,
 /// `gateway-client-tls`). The two repositories share no crate.
