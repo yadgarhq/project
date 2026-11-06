@@ -121,6 +121,7 @@ REQUIRED_BOUNDED_INTEGER = {
     "server.limits.keepaliveIntervalSeconds": (1, 3600),
     "server.limits.keepaliveTimeoutSeconds": (1, 600),
     "server.limits.maxHeaderListBytes": (1024, 1048576),
+    "server.limits.maxConnectionAgeSeconds": (1, 86400),
 }
 
 
@@ -474,6 +475,7 @@ TYPED_ON_PURPOSE: dict[str, dict[str, Any]] = {
     "server.limits.keepaliveIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
     "server.limits.keepaliveTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
     "server.limits.maxHeaderListBytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+    "server.limits.maxConnectionAgeSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
 }
 
 BLOCKS_ON_PURPOSE: dict[str, dict[str, Any]] = {
@@ -491,6 +493,7 @@ BLOCKS_ON_PURPOSE: dict[str, dict[str, Any]] = {
             "keepaliveIntervalSeconds",
             "keepaliveTimeoutSeconds",
             "maxConcurrentStreams",
+            "maxConnectionAgeSeconds",
             "maxHeaderListBytes",
         ],
     },
@@ -655,6 +658,9 @@ def census_mutations() -> dict[str, Any]:
         "required key dropped from projectDb": drop_required("projectDb", "requestTimeoutSeconds"),
         "required key dropped from projectDb.tls": drop_required("projectDb.tls", "enabled"),
         "required key dropped from server.limits": drop_required("server.limits", "maxHeaderListBytes"),
+        "required connection age dropped from server.limits": drop_required("server.limits", "maxConnectionAgeSeconds"),
+        "connection age bound raised": on_node("server.limits.maxConnectionAgeSeconds", {"maximum": 86401}),
+        "connection age bound lowered": on_node("server.limits.maxConnectionAgeSeconds", {"minimum": 2}),
         "required deleted from server.limits": delete_key("server.limits", "required"),
         "projectDb.tls.enabled loses its type": replace_node("projectDb.tls.enabled", {}),
         "server.limits leaf loses its type": replace_node("server.limits.maxConcurrentStreams", {}),

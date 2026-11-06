@@ -59,6 +59,7 @@ fn limits() -> ServerLimits {
             "KEEPALIVE_INTERVAL_SECS" => "30",
             "KEEPALIVE_TIMEOUT_SECS" => "10",
             "MAX_HEADER_LIST_BYTES" => "16384",
+            "MAX_CONNECTION_AGE_SECS" => "1800",
             _ => return None,
         };
         Some(value.to_string())

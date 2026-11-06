@@ -2,7 +2,7 @@
 //! reads it, and this is where that stops being a comment.
 //!
 //! `chart/values.schema.json` states a `minimum` and a `maximum` for each of the
-//! four keys; `yadgar_lifecycle::serve_tls::ServerLimits` states the same ranges
+//! five keys; `yadgar_lifecycle::serve_tls::ServerLimits` states the same ranges
 //! as consts and refuses the boot outside them. Nothing held the two together:
 //! bump the pin to a library that narrows a range and the chart would admit a
 //! value the binary refuses at boot. This test reds on that bump.
@@ -17,43 +17,54 @@ use serde_json::Value;
 use yadgar_lifecycle::serve_tls::ServerLimits;
 
 /// (chart leaf, env variable, ADR-1006 default, the library's range, the range as literals).
+/// The library range is `None` for `maxConnectionAgeSeconds` until the lifecycle
+/// pin carries `ServerLimits::MAX_CONNECTION_AGE_SECS` (yadgarhq/lifecycle#78,
+/// v0.4.0); its literal range is still pinned, and the pin-bump PR replaces the
+/// `None` with the const.
 type Row = (
     &'static str,
     &'static str,
     u64,
-    RangeInclusive<u64>,
+    Option<RangeInclusive<u64>>,
     (u64, u64),
 );
 
-fn rows() -> [Row; 4] {
+fn rows() -> [Row; 5] {
     [
         (
             "maxConcurrentStreams",
             "LISTEN_MAX_CONCURRENT_STREAMS",
             256,
-            ServerLimits::MAX_CONCURRENT_STREAMS,
+            Some(ServerLimits::MAX_CONCURRENT_STREAMS),
             (1, 10_000),
         ),
         (
             "keepaliveIntervalSeconds",
             "LISTEN_KEEPALIVE_INTERVAL_SECS",
             30,
-            ServerLimits::KEEPALIVE_INTERVAL_SECS,
+            Some(ServerLimits::KEEPALIVE_INTERVAL_SECS),
             (1, 3_600),
         ),
         (
             "keepaliveTimeoutSeconds",
             "LISTEN_KEEPALIVE_TIMEOUT_SECS",
             10,
-            ServerLimits::KEEPALIVE_TIMEOUT_SECS,
+            Some(ServerLimits::KEEPALIVE_TIMEOUT_SECS),
             (1, 600),
         ),
         (
             "maxHeaderListBytes",
             "LISTEN_MAX_HEADER_LIST_BYTES",
             16_384,
-            ServerLimits::MAX_HEADER_LIST_BYTES,
+            Some(ServerLimits::MAX_HEADER_LIST_BYTES),
             (1_024, 1_048_576),
+        ),
+        (
+            "maxConnectionAgeSeconds",
+            "LISTEN_MAX_CONNECTION_AGE_SECS",
+            1_800,
+            None,
+            (1, 86_400),
         ),
     ]
 }
@@ -86,11 +97,13 @@ fn the_schema_requires_each_key_as_an_integer_inside_the_library_range() {
         assert_eq!(property["type"], "integer", "{leaf}");
         let minimum = property["minimum"].as_u64().expect("`minimum` must be set");
         let maximum = property["maximum"].as_u64().expect("`maximum` must be set");
-        assert_eq!(
-            (minimum, maximum),
-            (*range.start(), *range.end()),
-            "{leaf}: the chart's range is not the one the pinned library refuses outside"
-        );
+        if let Some(range) = range {
+            assert_eq!(
+                (minimum, maximum),
+                (*range.start(), *range.end()),
+                "{leaf}: the chart's range is not the one the pinned library refuses outside"
+            );
+        }
         assert_eq!(
             (minimum, maximum),
             (low, high),
@@ -129,8 +142,8 @@ fn the_chart_defaults_are_the_adr_1006_numbers_and_inside_the_library_range() {
     let defaults = values_defaults();
     assert_eq!(
         defaults.len(),
-        4,
-        "expected exactly the four `server.limits` keys, got {defaults:?}"
+        5,
+        "expected exactly the five `server.limits` keys, got {defaults:?}"
     );
     for (leaf, _, want, range, _) in rows() {
         let (_, got) = defaults
@@ -138,10 +151,12 @@ fn the_chart_defaults_are_the_adr_1006_numbers_and_inside_the_library_range() {
             .find(|(key, _)| key == leaf)
             .unwrap_or_else(|| panic!("`server.limits.{leaf}` has no default in values.yaml"));
         assert_eq!(*got, want, "{leaf}: the ruled default (ADR-1006) moved");
-        assert!(
-            range.contains(got),
-            "{leaf}: the chart default {got} is outside the range the binary accepts"
-        );
+        if let Some(range) = range {
+            assert!(
+                range.contains(got),
+                "{leaf}: the chart default {got} is outside the range the binary accepts"
+            );
+        }
     }
     let get = |leaf: &str| defaults.iter().find(|(k, _)| k == leaf).map(|(_, v)| *v);
     assert!(

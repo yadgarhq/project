@@ -88,14 +88,15 @@ pub fn cleartext_env() -> Vec<(&'static str, &'static str)> {
     .collect()
 }
 
-/// The four listener limits the chart renders (ADR-1006). Required with no
+/// The five listener limits the chart renders (ADR-1006). Required with no
 /// compiled-in default (ADR-0569), so a harness that omits one boots nothing.
-pub fn listener_limits() -> [(&'static str, &'static str); 4] {
+pub fn listener_limits() -> [(&'static str, &'static str); 5] {
     [
         ("LISTEN_MAX_CONCURRENT_STREAMS", "256"),
         ("LISTEN_KEEPALIVE_INTERVAL_SECS", "30"),
         ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "10"),
         ("LISTEN_MAX_HEADER_LIST_BYTES", "16384"),
+        ("LISTEN_MAX_CONNECTION_AGE_SECS", "1800"),
     ]
 }
 
