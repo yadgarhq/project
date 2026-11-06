@@ -1,4 +1,4 @@
-"""`server.limits` (ADR-1006): four listener limits rendered into LISTEN_* (connection age omitted until tonic#2780 ships; yaadgaar #417).
+"""`server.limits` (ADR-1006): five listener limits rendered into LISTEN_* (`maxConnectionAgeSeconds` is read by yadgar-lifecycle from v0.4.0; older releases ignore it; yaadgaar #417).
 
 The binary has no default for any of them (ADR-0569): it refuses the boot on an
 absent, non-numeric or out-of-range value. `values.schema.json` owns each key's
@@ -23,6 +23,7 @@ DEFAULTS = {
     "LISTEN_KEEPALIVE_INTERVAL_SECS": "30",
     "LISTEN_KEEPALIVE_TIMEOUT_SECS": "10",
     "LISTEN_MAX_HEADER_LIST_BYTES": "16384",
+    "LISTEN_MAX_CONNECTION_AGE_SECS": "1800",
 }
 
 
@@ -78,6 +79,8 @@ def test_a_keepalive_timeout_just_below_the_interval_renders():
         ("keepaliveTimeoutSeconds", 601),
         ("maxHeaderListBytes", 1023),
         ("maxHeaderListBytes", 1048577),
+        ("maxConnectionAgeSeconds", 0),
+        ("maxConnectionAgeSeconds", 86401),
     ],
 )
 def test_an_out_of_range_value_is_refused_at_the_schema(key, value):
@@ -85,6 +88,13 @@ def test_an_out_of_range_value_is_refused_at_the_schema(key, value):
     assert result.returncode != 0, result.stdout
     assert SCHEMA_WRAPPER in result.stderr or key in result.stderr, result.stderr
     assert key in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("bound", ["1", "86400"])
+def test_the_connection_age_bounds_render_as_whole_numbers(bound):
+    result = render(CHART, "--set", f"server.limits.maxConnectionAgeSeconds={bound}")
+    assert result.returncode == 0, result.stderr
+    assert deployment_env(result.stdout)["LISTEN_MAX_CONNECTION_AGE_SECS"] == bound
 
 
 def test_a_non_integer_value_is_refused_at_the_schema():
@@ -132,6 +142,7 @@ def test_the_shipped_defaults_are_the_adr_1006_numbers():
         "keepaliveIntervalSeconds": 30,
         "keepaliveTimeoutSeconds": 10,
         "maxHeaderListBytes": 16384,
+        "maxConnectionAgeSeconds": 1800,
     }
 
 
